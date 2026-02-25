@@ -1,0 +1,13 @@
+{
+  "name": "tg-channel-manager-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.0",
+    "express": "^4.19.0",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}

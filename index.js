@@ -1,8 +1,9 @@
 // ===============================
-//  Telegram Channel Manager Bot (Render Ready + Style Menu)
-//  - /menu → স্টাইল সিলেক্ট করার মেনু
-//  - স্টাইল সিলেক্ট করার পর, পরের টেক্সট মেসেজ চ্যানেলে ওই স্টাইলে পোস্ট হবে (+ Copy বাটন)
-//  - আগের সব ফিচার থাকছে: /post, /post_spoiler, /send
+//  Telegram Channel Manager Bot (Render Ready + Many Styles)
+//  - 4-dot menu commands: /normal, /bold, /italic, /underline, /strike, /spoiler,
+//    /code, /pre, /quote, /link, /heading, /bullets, /note, /warning, /success, /info
+//  - স্টাইল কমান্ড চাপলে → পরের টেক্সট ওই স্টাইলে চ্যানেলে পোস্ট হবে (+ Copy বাটন)
+//  - আগের ফিচার: /post, /post_spoiler, /send
 // ===============================
 
 require('dotenv').config();
@@ -91,7 +92,7 @@ function buildCopyKeyboard(copyText) {
 }
 
 // ===============================
-// Style session (মেনু থেকে সিলেক্ট করা স্টাইল)
+// Style session (কোন কমান্ড দিয়ে কোন স্টাইল সিলেক্ট হয়েছে)
 // ===============================
 const styleSession = {}; // key: userId → { mode, awaitingText }
 
@@ -119,17 +120,34 @@ function styleLabel(mode) {
       return 'Underline';
     case 'strike':
       return 'Strikethrough';
+    case 'spoiler':
+      return 'Spoiler / Blur';
     case 'code':
       return 'Inline Code';
     case 'pre':
       return 'Code Block';
-    case 'spoiler':
-      return 'Spoiler / Blur';
+    case 'quote':
+      return 'Quote';
+    case 'link':
+      return 'Link';
+    case 'heading':
+      return 'Heading';
+    case 'bullets':
+      return 'Bullet List';
+    case 'note':
+      return 'Note';
+    case 'warning':
+      return 'Warning';
+    case 'success':
+      return 'Success';
+    case 'info':
+      return 'Info';
     default:
       return mode;
   }
 }
 
+// সব স্টাইলে (link ছাড়া) কীভাবে HTML বানাবো
 function buildStyledHtml(mode, plainText) {
   const safe = escapeHtml(plainText);
 
@@ -142,12 +160,32 @@ function buildStyledHtml(mode, plainText) {
       return `<u>${safe}</u>`;
     case 'strike':
       return `<s>${safe}</s>`;
+    case 'spoiler':
+      return `<tg-spoiler>${safe}</tg-spoiler>`;
     case 'code':
       return `<code>${safe}</code>`;
     case 'pre':
       return `<pre>${safe}</pre>`;
-    case 'spoiler':
-      return `<tg-spoiler>${safe}</tg-spoiler>`;
+    case 'quote':
+      return `<blockquote>${safe}</blockquote>`;
+    case 'heading':
+      return `🔹 <b>${safe}</b>\n──────────────`;
+    case 'bullets': {
+      const lines = safe
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      if (lines.length === 0) return '';
+      return lines.map((l) => `• ${l}`).join('\n');
+    }
+    case 'note':
+      return `📌 <b>Note:</b> ${safe}`;
+    case 'warning':
+      return `⚠️ <b>Warning:</b> ${safe}`;
+    case 'success':
+      return `✅ <b>Success:</b> ${safe}`;
+    case 'info':
+      return `ℹ️ <b>Info:</b> ${safe}`;
     case 'normal':
     default:
       return safe;
@@ -173,105 +211,82 @@ bot.onText(/^\/start$/, (msg) => {
 
 এই বট দিয়ে তুমি তোমার চ্যানেলের পোস্টগুলো প্রো-লেভেলে ম্যানেজ করতে পারবে।
 
-<b>মেইন মেনু:</b>
-<b>/menu</b> → স্টাইল সিলেক্ট করার মেনু (Bold, Italic, Underline, Code, Spoiler, ইত্যাদি)
+<b>স্টাইল কমান্ডসমূহ (4-dot মেনুতে দেখাবে):</b>
+/normal, /bold, /italic, /underline, /strike, /spoiler, /code, /pre,
+/quote, /link, /heading, /bullets, /note, /warning, /success, /info
 
-<b>কমান্ডসমূহ:</b>
-<b>/post</b> &lt;b&gt;HTML পোস্ট&lt;/b&gt;
-  → নিজে HTML লিখে পোস্ট + Copy বাটন
+<b>কাজের ধাপ:</b>
+1️⃣ 4-dot থেকে একটি স্টাইল কমান্ড সিলেক্ট করো (যেমন /bold)
+/bold → আমি বলবো "Bold স্টাইল সিলেক্ট হয়েছে..."
+2️⃣ তারপর যে টেক্সট পাঠাবে, তা অটো ওই স্টাইলে চ্যানেলে পোস্ট হবে
+3️⃣ প্রতিটি পোস্টের নিচে 📋 Copy বাটন থাকবে
 
-<b>/post_spoiler</b> লেখাঃ
-  → পুরো পোস্ট blur/spoiler আকারে থাকবে + Copy বাটন
-
-<b>/send</b> (reply করে)
-  → যে মেসেজে reply করবে, সেটা চ্যানেলে copy হবে
-  → যদি টেক্সট/ক্যাপশন থাকে, Copy বাটনও থাকবে
-
-<b>HTML উদাহরণ (/post):</b>
-/post &lt;b&gt;বোল্ড&lt;/b&gt; &lt;i&gt;italic&lt;/i&gt; &lt;a href="https://example.com"&gt;লিংক&lt;/a&gt;
+<b>অতিরিক্ত কমান্ড:</b>
+/post &lt;b&gt;কাস্টম HTML&lt;/b&gt; → নিজে HTML লিখে পোস্ট
+/post_spoiler টেক্সট → সরাসরি spoiler/blur পোস্ট
+/send (reply করে) → যে মেসেজে reply করবে সেটি চ্যানেলে কপি হবে
 `;
 
   bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
 });
 
 // ===============================
-// /menu কমান্ড: স্টাইল সিলেক্ট করার মেনু
+// Helper: স্টাইল কমান্ড হ্যান্ডলার
 // ===============================
-bot.onText(/^\/menu$/, (msg) => {
+function handleStyleCommand(mode, msg) {
   const chatId = msg.chat.id;
 
   if (!isOwner(msg)) {
-    return bot.sendMessage(chatId, 'এই মেনু শুধু Owner ব্যবহার করতে পারবে।', {
+    return bot.sendMessage(chatId, 'এই কমান্ড শুধু Owner ব্যবহার করতে পারবে।', {
       reply_to_message_id: msg.message_id,
     });
   }
 
-  const keyboard = {
-    inline_keyboard: [
-      [
-        { text: 'Normal', callback_data: 'style:normal' },
-        { text: 'Bold', callback_data: 'style:bold' },
-      ],
-      [
-        { text: 'Italic', callback_data: 'style:italic' },
-        { text: 'Underline', callback_data: 'style:underline' },
-      ],
-      [
-        { text: 'Strikethrough', callback_data: 'style:strike' },
-        { text: 'Inline Code', callback_data: 'style:code' },
-      ],
-      [
-        { text: 'Code Block', callback_data: 'style:pre' },
-        { text: 'Spoiler / Blur', callback_data: 'style:spoiler' },
-      ],
-    ],
-  };
-
-  bot.sendMessage(
-    chatId,
-    '🧷 যে স্টাইলে চ্যানেলে পোস্ট করতে চান, নিচ থেকে সেটি সিলেক্ট করুন:',
-    { reply_markup: keyboard }
-  );
-});
-
-// ===============================
-// Callback query (মেনু থেকে স্টাইল সিলেক্ট)
-// ===============================
-bot.on('callback_query', (query) => {
-  const data = query.data;
-
-  if (!data || !data.startsWith('style:')) {
-    return bot.answerCallbackQuery(query.id);
-  }
-
-  if (!isOwner(query.from)) {
-    return bot.answerCallbackQuery(query.id, {
-      text: 'এই মেনু শুধু Owner এর জন্য।',
-      show_alert: true,
-    });
-  }
-
-  const mode = data.split(':')[1];
-  const userId = query.from.id;
-  const chatId = query.message.chat.id;
-
+  const userId = msg.from.id;
   setStyleSession(userId, mode);
 
   const label = styleLabel(mode);
+  let hint = 'এখন যে টেক্সট পাঠাবেন, আমি সেটাকে এই স্টাইলে চ্যানেলে পোস্ট করবো।';
 
-  bot.answerCallbackQuery(query.id, {
-    text: `স্টাইল সিলেক্ট হয়েছে: ${label}`,
-  });
+  if (mode === 'link') {
+    hint =
+      'ফরম্যাট: শিরোনাম | https://example.com\nউদাহরণ: আমার সাইট | https://example.com';
+  } else if (mode === 'bullets') {
+    hint =
+      'প্রতিটি পয়েন্ট আলাদা লাইনে লিখুন। উদাহরণ:\nপয়েন্ট ১\nপয়েন্ট ২\nপয়েন্ট ৩';
+  } else if (mode === 'heading') {
+    hint = 'এক লাইনের শিরোনাম লিখুন (heading/title)।';
+  }
 
   bot.sendMessage(
     chatId,
-    `✅ "${label}" স্টাইল সিলেক্ট করা হয়েছে।\nএখন যেই টেক্সট পাঠাবেন, আমি সেটাকে এই স্টাইলে চ্যানেলে পোস্ট করবো।`,
-    { reply_to_message_id: query.message.message_id }
+    `✅ "${label}" স্টাইল সিলেক্ট করা হয়েছে।\n\n${hint}`,
+    { reply_to_message_id: msg.message_id }
   );
-});
+}
 
 // ===============================
-// /post: HTML পোস্ট + Copy বাটন (আগের মতই)
+// স্টাইল কমান্ডগুলো
+// ===============================
+bot.onText(/^\/normal$/, (msg) => handleStyleCommand('normal', msg));
+bot.onText(/^\/bold$/, (msg) => handleStyleCommand('bold', msg));
+bot.onText(/^\/italic$/, (msg) => handleStyleCommand('italic', msg));
+bot.onText(/^\/underline$/, (msg) => handleStyleCommand('underline', msg));
+bot.onText(/^\/strike$/, (msg) => handleStyleCommand('strike', msg));
+bot.onText(/^\/spoiler$/, (msg) => handleStyleCommand('spoiler', msg));
+bot.onText(/^\/code$/, (msg) => handleStyleCommand('code', msg));
+bot.onText(/^\/pre$/, (msg) => handleStyleCommand('pre', msg));
+bot.onText(/^\/quote$/, (msg) => handleStyleCommand('quote', msg));
+bot.onText(/^\/link$/, (msg) => handleStyleCommand('link', msg));
+bot.onText(/^\/heading$/, (msg) => handleStyleCommand('heading', msg));
+bot.onText(/^\/bullets$/, (msg) => handleStyleCommand('bullets', msg));
+bot.onText(/^\/note$/, (msg) => handleStyleCommand('note', msg));
+bot.onText(/^\/warning$/, (msg) => handleStyleCommand('warning', msg));
+bot.onText(/^\/success$/, (msg) => handleStyleCommand('success', msg));
+bot.onText(/^\/info$/, (msg) => handleStyleCommand('info', msg));
+
+// ===============================
+// /post: HTML পোস্ট + Copy বাটন
 // ===============================
 bot.onText(/^\/post\s+([\s\S]+)/, (msg, match) => {
   const chatId = msg.chat.id;
@@ -312,7 +327,7 @@ bot.onText(/^\/post\s+([\s\S]+)/, (msg, match) => {
 });
 
 // ===============================
-// /post_spoiler: spoiler/blur পোস্ট + Copy বাটন (আগের মতই)
+// /post_spoiler: spoiler/blur পোস্ট + Copy বাটন
 // ===============================
 bot.onText(/^\/post_spoiler\s+([\s\S]+)/, (msg, match) => {
   const chatId = msg.chat.id;
@@ -411,12 +426,12 @@ bot.onText(/^\/send$/, (msg) => {
 // ===============================
 // সাধারণ non-command মেসেজ হ্যান্ডলার
 // - যদি styleSession active থাকে → স্টাইল অনুযায়ী পোস্ট করবে
-// - না থাকলে শুধু /send এর hint দেখাবে (আগের মত)
+// - না থাকলে শুধু /send এর hint দেখাবে
 // ===============================
 bot.on('message', (msg) => {
   const chatId = msg.chat.id;
 
-  // কমান্ডগুলো এখানে হ্যান্ডল করবো না
+  // কমান্ডগুলোর জন্য আলাদা হ্যান্ডলার আছে, তাই এখানে স্কিপ
   if (msg.text && msg.text.startsWith('/')) return;
 
   if (!isOwner(msg)) {
@@ -435,9 +450,47 @@ bot.on('message', (msg) => {
       );
     }
 
+    const mode = state.mode;
     const plainText = msg.text;
-    const htmlText = buildStyledHtml(state.mode, plainText);
-    const replyMarkup = buildCopyKeyboard(plainText);
+    let htmlText;
+    let copyText;
+
+    if (mode === 'link') {
+      const parts = plainText.split('|').map((p) => p.trim());
+      const title = parts[0];
+      const urlPart = parts[1];
+
+      if (!title || !urlPart) {
+        return bot.sendMessage(
+          chatId,
+          '❗ ফরম্যাট ঠিক করুন:\nশিরোনাম | https://example.com\nউদাহরণ:\nআমার সাইট | https://example.com',
+          { reply_to_message_id: msg.message_id }
+        );
+      }
+
+      let url = urlPart;
+      if (!/^https?:\/\//i.test(url)) {
+        url = 'https://' + url;
+      }
+
+      const titleSafe = escapeHtml(title);
+      const urlSafe = escapeHtml(url);
+
+      htmlText = `<a href="${urlSafe}">${titleSafe}</a>`;
+      copyText = `${title} - ${url}`;
+    } else {
+      htmlText = buildStyledHtml(mode, plainText);
+      if (!htmlText) {
+        return bot.sendMessage(
+          chatId,
+          '❌ টেক্সট ফরম্যাট করতে সমস্যা হয়েছে, আবার চেষ্টা করুন।',
+          { reply_to_message_id: msg.message_id }
+        );
+      }
+      copyText = plainText;
+    }
+
+    const replyMarkup = buildCopyKeyboard(copyText);
 
     bot
       .sendMessage(CHANNEL_ID, htmlText, {
@@ -465,10 +518,10 @@ bot.on('message', (msg) => {
     return;
   }
 
-  // কোনো স্টাইল সিলেক্ট নেই → আগের মত hint
+  // কোনো স্টাইল সিলেক্ট নেই → hint
   bot.sendMessage(
     chatId,
-    'ℹ️ যদি এই মেসেজটা চ্যানেলে পাঠাতে চান:\n👉 এটাতে reply করে /send লিখুন।\n\nঅথবা নতুন স্টাইলে পোস্ট করতে চাইলে আগে /menu দিয়ে স্টাইল সিলেক্ট করুন।',
+    'ℹ️ যদি এই মেসেজটা চ্যানেলে পাঠাতে চান:\n👉 এটাতে reply করে /send লিখুন।\n\nঅথবা 4-dot মেনু থেকে একটি স্টাইল কমান্ড সিলেক্ট করে তারপর টেক্সট পাঠান।',
     { reply_to_message_id: msg.message_id }
   );
 });

@@ -8,17 +8,22 @@ const OWNER_ID = Number(process.env.OWNER_ID);
 const PORT = process.env.PORT || 3000;
 
 if (!BOT_TOKEN || !CHANNEL_ID || !OWNER_ID) {
+  console.error("Missing Environment Variables! Check .env file.");
   process.exit(1);
 }
 
+// Express Server for keep-alive (e.g., Replit, Render)
 const app = express();
-app.get('/', (_req, res) => res.send('Bot is running.'));
-app.listen(PORT);
+app.get('/', (_req, res) => res.send('Channel Manager Pro Bot is running smoothly.'));
+app.listen(PORT, () => console.log(`Server is running on port ${PORT}`));
 
+// Initialize Bot
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-bot.setMyCommands([]); 
+// Setup Bot Commands Menu
+bot.setMyCommands([{ command: '/start', description: 'Start the bot / Main Menu' }]);
 
+// Session Management
 const sessions = {};
 
 function getSession(uid) {
@@ -31,8 +36,7 @@ function getSession(uid) {
       draftButtons: [],
       mediaType: null,
       mediaId: null,
-      lastMenuMsgId: null,
-      messagesToClean: []
+      lastMenuMsgId: null
     };
   }
   return sessions[uid];
@@ -49,11 +53,18 @@ function resetSession(uid) {
   session.mediaId = null;
 }
 
+// Utility: HTML Escaper
 function escapeHtml(t) {
   if (!t) return '';
   return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// Utility: Delete Message Silently
+async function safeDelete(chatId, msgId) {
+  try { await bot.deleteMessage(chatId, msgId); } catch (e) { /* Ignore */ }
+}
+
+// Utility: Parse Buttons Custom Format
 function parseButtonsBlock(text) {
   if (!text) return { textOnly: text, buttons: [] };
   const idx = text.lastIndexOf('BUTTONS:');
@@ -78,29 +89,47 @@ function parseButtonsBlock(text) {
   return { textOnly: before, buttons };
 }
 
-async function cleanUserMessages(chatId, uid) {
-  const session = getSession(uid);
-  if (session.messagesToClean.length > 0) {
-    for (const msgId of session.messagesToClean) {
-      try { await bot.deleteMessage(chatId, msgId); } catch (e) { }
-    }
-    session.messagesToClean = []; 
+// Menus (Using Inline Keyboards for a Clean UI)
+const MAIN_MENU = {
+  inline_keyboard: [
+    [{ text: '⚡ Quick Mode', callback_data: 'm_quick' }, { text: '🧱 Multi Mode', callback_data: 'm_multi' }],
+    [{ text: '🖼️ Media Post', callback_data: 'm_media' }, { text: '📝 Raw HTML', callback_data: 'm_html' }],
+    [{ text: '🔄 Repost Msg', callback_data: 'm_repost' }, { text: '😶‍🌫️ Spoiler', callback_data: 'm_spoiler' }],
+    [{ text: '❌ Reset Bot', callback_data: 'reset' }]
+  ]
+};
+
+const CANCEL_MENU = {
+  inline_keyboard: [[{ text: '🔙 Cancel', callback_data: 'cancel' }]]
+};
+
+const STYLES = [
+  { id: 'normal', text: 'Normal 🔤' },     { id: 'title', text: '🏆 Title' },
+  { id: 'bold', text: '𝗕𝗼𝗹𝗱' },            { id: 'heading', text: '🔹 Heading' },
+  { id: 'italic', text: '𝙄𝙩𝙖𝙡𝙞𝙘' },        { id: 'highlight', text: '🌟 Highlight' },
+  { id: 'spoiler', text: 'Spoiler 🌫️' },   { id: 'quote', text: '❝ Quote' },
+  { id: 'expand_quote', text: '📖 Exp. Quote' }, { id: 'code', text: '𝙲𝚘𝚍𝚎 (Copy)' },
+  { id: 'bullets', text: '• Bullets' },    { id: 'numbered', text: '1️⃣ Numbered' },
+  { id: 'pros', text: '✅ Pros' },         { id: 'cons', text: '❌ Cons' },
+  { id: 'link', text: '🔗 Link' },         { id: 'signature', text: '✍️ Signature' }
+];
+
+function getStyleMenu(session) {
+  const keyboard = [];
+  for (let i = 0; i < STYLES.length; i += 2) {
+    keyboard.push([
+      { text: STYLES[i].text, callback_data: `s_${STYLES[i].id}` },
+      ...(STYLES[i+1] ? [{ text: STYLES[i+1].text, callback_data: `s_${STYLES[i+1].id}` }] : [])
+    ]);
   }
+  if (session.mode === 'multi') {
+    keyboard.push([{ text: `🚀 Publish Draft (${session.draftBlocks.length} Blocks)`, callback_data: 'publish' }]);
+  }
+  keyboard.push([{ text: '🔙 Back to Menu', callback_data: 'cancel' }]);
+  return { inline_keyboard: keyboard };
 }
 
-async function renderMenu(chatId, uid, text, markup) {
-  const session = getSession(uid);
-  if (session.lastMenuMsgId) {
-    try { await bot.deleteMessage(chatId, session.lastMenuMsgId); } catch(e){}
-  }
-  try {
-    const sent = await bot.sendMessage(chatId, text, { 
-      parse_mode: 'HTML', reply_markup: markup, disable_web_page_preview: true 
-    });
-    session.lastMenuMsgId = sent.message_id;
-  } catch(e) {}
-}
-
+// HTML Builder
 function buildStyledHtml(style, plainText) {
   const safe = escapeHtml(plainText || '');
   const lines = (plainText || '').split('\n').map(l => l.trim()).filter(Boolean);
@@ -130,126 +159,99 @@ function buildStyledHtml(style, plainText) {
   }
 }
 
-const MAIN_MENU = {
-  keyboard: [
-    [{ text: '⚡ Quick Mode' }, { text: '🧱 Multi Mode' }],
-    [{ text: '🖼️ Media Post' }, { text: '📝 Raw HTML' }],
-    [{ text: '🔄 Repost Msg' }, { text: '😶‍🌫️ Spoiler' }],
-    [{ text: '❌ Reset Bot' }]
-  ],
-  resize_keyboard: true
-};
-
-const CANCEL_MENU = {
-  keyboard: [[{ text: '🔙 Cancel' }]],
-  resize_keyboard: true
-};
-
-const STYLES = [
-  { id: 'normal', text: 'Normal 🔤' },     { id: 'title', text: '🏆 Title' },
-  { id: 'bold', text: '𝗕𝗼𝗹𝗱' },            { id: 'heading', text: '🔹 Heading' },
-  { id: 'italic', text: '𝙄𝙩𝙖𝙡𝙞𝙘' },        { id: 'highlight', text: '🌟 Highlight' },
-  { id: 'spoiler', text: 'Spoiler 🌫️' },   { id: 'quote', text: '❝ Quote' },
-  { id: 'expand_quote', text: '📖 Exp. Quote' }, { id: 'code', text: '𝙲𝚘𝚍𝚎 (Copy)' },
-  { id: 'bullets', text: '• Bullets' },    { id: 'numbered', text: '1️⃣ Numbered' },
-  { id: 'pros', text: '✅ Pros' },         { id: 'cons', text: '❌ Cons' },
-  { id: 'link', text: '🔗 Link' },         { id: 'signature', text: '✍️ Signature' }
-];
-
-function getStyleMenu(session) {
-  const keyboard = [];
-  for (let i = 0; i < STYLES.length; i += 2) {
-    keyboard.push([
-      { text: STYLES[i].text },
-      ...(STYLES[i+1] ? [{ text: STYLES[i+1].text }] : [])
-    ]);
+// UI Updater (Edits single message instead of spamming)
+async function updateMenu(chatId, uid, text, markup) {
+  const session = getSession(uid);
+  try {
+    if (session.lastMenuMsgId) {
+      await bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: session.lastMenuMsgId,
+        parse_mode: 'HTML',
+        reply_markup: markup,
+        disable_web_page_preview: true
+      });
+    } else {
+      const sent = await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: markup, disable_web_page_preview: true });
+      session.lastMenuMsgId = sent.message_id;
+    }
+  } catch (err) {
+    // If message was deleted or old, send a new one
+    const sent = await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: markup, disable_web_page_preview: true });
+    session.lastMenuMsgId = sent.message_id;
   }
-  if (session.mode === 'multi') {
-    keyboard.push([{ text: `🚀 Publish Draft (${session.draftBlocks.length} Blocks)` }]);
-  }
-  keyboard.push([{ text: '🔙 Back' }]);
-  return { keyboard, resize_keyboard: true };
 }
 
+// Command: /start
 bot.onText(/^\/start$/, async (msg) => {
   const uid = msg.from.id;
   if (uid !== OWNER_ID) return;
   const chatId = msg.chat.id;
-  const session = getSession(uid);
   
-  session.messagesToClean.push(msg.message_id);
-  await cleanUserMessages(chatId, uid);
+  await safeDelete(chatId, msg.message_id); // Delete user's /start
   resetSession(uid);
   
-  await renderMenu(chatId, uid, `👑 <b>Channel Manager Pro</b>\n\nস্বাগতম! নিচের মেনু থেকে অপশন নির্বাচন করুন:`, MAIN_MENU);
+  // Force delete old menu if user types /start manually
+  const session = getSession(uid);
+  if(session.lastMenuMsgId) await safeDelete(chatId, session.lastMenuMsgId);
+  session.lastMenuMsgId = null;
+
+  await updateMenu(chatId, uid, `👑 <b>Channel Manager Pro</b>\n\nস্বাগতম! নিচের মেনু থেকে অপশন নির্বাচন করুন:`, MAIN_MENU);
 });
 
-bot.on('message', async (msg) => {
-  const uid = msg.from.id;
-  if (uid !== OWNER_ID) return;
-  if (msg.text && msg.text.startsWith('/start')) return;
-  const chatId = msg.chat.id;
-  const session = getSession(uid);
+// Handle Button Clicks (Inline Keyboard Responses)
+bot.on('callback_query', async (query) => {
+  const uid = query.from.id;
+  if (uid !== OWNER_ID) return bot.answerCallbackQuery(query.id, { text: "Not Authorized", show_alert: true });
   
-  session.messagesToClean.push(msg.message_id);
+  const chatId = query.message.chat.id;
+  const data = query.data;
+  const session = getSession(uid);
 
-  const text = msg.text || '';
+  // Always answer callback to remove loading state
+  bot.answerCallbackQuery(query.id).catch(()=>{});
 
-  if (text === '❌ Reset Bot' || text === '🔙 Cancel' || text === '🔙 Back') {
+  if (data === 'reset' || data === 'cancel') {
     resetSession(uid);
-    await cleanUserMessages(chatId, uid);
-    await renderMenu(chatId, uid, `👑 <b>Channel Manager Pro</b>\n\nমেনু থেকে অপশন নির্বাচন করুন:`, MAIN_MENU);
+    await updateMenu(chatId, uid, `👑 <b>Channel Manager Pro</b>\n\nঅপারেশন বাতিল করা হয়েছে। নতুন অপশন নির্বাচন করুন:`, MAIN_MENU);
     return;
   }
 
-  if (text === '⚡ Quick Mode') {
-    session.mode = 'quick';
-    session.state = 'IDLE';
-    await cleanUserMessages(chatId, uid);
-    await renderMenu(chatId, uid, `⚡ <b>Quick Mode</b>\nস্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
+  if (data === 'm_quick') {
+    session.mode = 'quick'; session.state = 'IDLE';
+    await updateMenu(chatId, uid, `⚡ <b>Quick Mode</b>\nটেক্সট পোস্ট করার স্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
     return;
   }
-
-  if (text === '🧱 Multi Mode') {
-    session.mode = 'multi';
-    session.state = 'IDLE';
-    await cleanUserMessages(chatId, uid);
-    await renderMenu(chatId, uid, `🧱 <b>Multi Mode</b>\nস্টাইল সিলেক্ট করে ব্লক তৈরি করুন:`, getStyleMenu(session));
+  if (data === 'm_multi') {
+    session.mode = 'multi'; session.state = 'IDLE';
+    await updateMenu(chatId, uid, `🧱 <b>Multi Mode</b>\nস্টাইল সিলেক্ট করে ব্লক তৈরি করুন:`, getStyleMenu(session));
     return;
   }
-
-  if (text === '🖼️ Media Post') {
+  if (data === 'm_media') {
     session.state = 'AWAITING_MEDIA';
-    await cleanUserMessages(chatId, uid);
-    await renderMenu(chatId, uid, `🖼️ <b>Media Mode</b>\nআপনার ছবি বা ভিডিওটি পাঠান।`, CANCEL_MENU);
+    await updateMenu(chatId, uid, `🖼️ <b>Media Mode</b>\nআপনার ছবি বা ভিডিওটি ফরওয়ার্ড বা সেন্ড করুন।`, CANCEL_MENU);
     return;
   }
-
-  if (text === '📝 Raw HTML') {
+  if (data === 'm_html') {
     session.state = 'AWAITING_RAW';
-    await cleanUserMessages(chatId, uid);
-    await renderMenu(chatId, uid, `📝 <b>Raw HTML</b>\nHTML কোড পাঠান।`, CANCEL_MENU);
+    await updateMenu(chatId, uid, `📝 <b>Raw HTML</b>\nসরাসরি HTML কোড পাঠান।`, CANCEL_MENU);
     return;
   }
-
-  if (text === '🔄 Repost Msg') {
+  if (data === 'm_repost') {
     session.state = 'AWAITING_REPOST';
-    await cleanUserMessages(chatId, uid);
-    await renderMenu(chatId, uid, `🔄 <b>Repost Mode</b>\nমেসেজটি ফরওয়ার্ড বা সেন্ড করুন।`, CANCEL_MENU);
+    await updateMenu(chatId, uid, `🔄 <b>Repost Mode</b>\nযেকোনো মেসেজ ফরওয়ার্ড বা সেন্ড করুন।`, CANCEL_MENU);
     return;
   }
-
-  if (text === '😶‍🌫️ Spoiler') {
+  if (data === 'm_spoiler') {
     session.state = 'AWAITING_SPOILER';
-    await cleanUserMessages(chatId, uid);
-    await renderMenu(chatId, uid, `😶‍🌫️ <b>Raw Spoiler</b>\nটেক্সট পাঠান।`, CANCEL_MENU);
+    await updateMenu(chatId, uid, `😶‍🌫️ <b>Raw Spoiler</b>\nটেক্সট পাঠান, যা চ্যানেলে হাইড অবস্থায় থাকবে।`, CANCEL_MENU);
     return;
   }
 
-  if (text.startsWith('🚀 Publish Draft')) {
+  // Handle Publish
+  if (data === 'publish') {
     if (session.draftBlocks.length === 0) {
-      await cleanUserMessages(chatId, uid);
-      await renderMenu(chatId, uid, `⚠️ <b>Empty draft!</b>`, getStyleMenu(session));
+      await updateMenu(chatId, uid, `⚠️ <b>Empty draft!</b> কোনো ব্লক নেই।`, getStyleMenu(session));
       return;
     }
     const html = session.draftBlocks.join('\n\n');
@@ -257,37 +259,54 @@ bot.on('message', async (msg) => {
     try {
       await bot.sendMessage(CHANNEL_ID, html, { parse_mode: 'HTML', reply_markup: replyMarkup, disable_web_page_preview: true });
       resetSession(uid);
-      await cleanUserMessages(chatId, uid);
-      await renderMenu(chatId, uid, `✅ <b>সফলভাবে পোস্ট হয়েছে!</b>`, MAIN_MENU);
+      await updateMenu(chatId, uid, `✅ <b>সফলভাবে চ্যানেলে পোস্ট হয়েছে!</b>\n\nনতুন কিছু পোস্ট করতে চাইলে সিলেক্ট করুন:`, MAIN_MENU);
     } catch (err) {
-      await cleanUserMessages(chatId, uid);
-      await renderMenu(chatId, uid, `❌ <b>Error posting to channel!</b>`, getStyleMenu(session));
+      await updateMenu(chatId, uid, `❌ <b>Error!</b> চ্যানেলে পোস্ট করতে ব্যর্থ হয়েছে। HTML বা Bot Admin Right চেক করুন।`, getStyleMenu(session));
     }
     return;
   }
 
-  const selectedStyleObj = STYLES.find(s => s.text === text);
-  if (selectedStyleObj) {
-    session.selectedStyle = selectedStyleObj.id;
-    session.state = 'AWAITING_TEXT';
-    await cleanUserMessages(chatId, uid);
-    await renderMenu(chatId, uid, `✏️ <b>Editor</b>\nস্টাইল: <b>${selectedStyleObj.id.toUpperCase()}</b>\n\nএখন টেক্সট পাঠান...`, CANCEL_MENU);
-    return;
+  // Handle Style Selection
+  if (data.startsWith('s_')) {
+    const styleId = data.replace('s_', '');
+    const selectedStyleObj = STYLES.find(s => s.id === styleId);
+    if (selectedStyleObj) {
+      session.selectedStyle = selectedStyleObj.id;
+      session.state = 'AWAITING_TEXT';
+      await updateMenu(chatId, uid, `✏️ <b>Editor (${selectedStyleObj.text})</b>\n\nএখন আপনার কাঙ্ক্ষিত টেক্সট টাইপ করে সেন্ড করুন...`, CANCEL_MENU);
+    }
   }
+});
 
+// Handle User Messages (Text, Photo, Video)
+bot.on('message', async (msg) => {
+  const uid = msg.from.id;
+  if (uid !== OWNER_ID) return;
+  if (msg.text && msg.text.startsWith('/start')) return; // handled separately
+  
+  const chatId = msg.chat.id;
+  const session = getSession(uid);
+  
+  // Immediately delete user's message to keep chat completely clean
+  await safeDelete(chatId, msg.message_id);
+
+  if (session.state === 'IDLE') return; // Do nothing if bot is not expecting a message
+
+  const text = msg.text || msg.caption || '';
+
+  // Handle Repost
   if (session.state === 'AWAITING_REPOST') {
     try {
       await bot.copyMessage(CHANNEL_ID, chatId, msg.message_id);
-      await cleanUserMessages(chatId, uid);
       resetSession(uid);
-      await renderMenu(chatId, uid, `✅ <b>কপি সম্পন্ন!</b>`, MAIN_MENU);
+      await updateMenu(chatId, uid, `✅ <b>কপি সম্পন্ন! মেসেজ চ্যানেলে পাঠানো হয়েছে।</b>\n\nপরবর্তী কাজ নির্বাচন করুন:`, MAIN_MENU);
     } catch (err) {
-      await cleanUserMessages(chatId, uid);
-      await renderMenu(chatId, uid, `❌ <b>Error</b>`, MAIN_MENU);
+      await updateMenu(chatId, uid, `❌ <b>Error!</b> কপি করতে সমস্যা হয়েছে।`, MAIN_MENU);
     }
     return;
   }
 
+  // Handle Media Upload
   if (session.state === 'AWAITING_MEDIA') {
     if (msg.photo) {
       session.mediaId = msg.photo[msg.photo.length - 1].file_id;
@@ -296,20 +315,17 @@ bot.on('message', async (msg) => {
       session.mediaId = msg.video.file_id;
       session.mediaType = 'video';
     } else {
-      await cleanUserMessages(chatId, uid);
+      await updateMenu(chatId, uid, `⚠️ দয়া করে ছবি অথবা ভিডিও পাঠান!`, CANCEL_MENU);
       return;
     }
     session.mode = 'media_caption';
     session.state = 'IDLE';
-    await cleanUserMessages(chatId, uid);
-    await renderMenu(chatId, uid, `✅ <b>মিডিয়া যুক্ত হয়েছে!</b>\nক্যাপশনের স্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
+    await updateMenu(chatId, uid, `✅ <b>মিডিয়া যুক্ত হয়েছে!</b>\nএবার ক্যাপশনের স্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
     return;
   }
 
-  if (!text) {
-    await cleanUserMessages(chatId, uid);
-    return;
-  }
+  // Handle Raw Text and Spoilers
+  if (!text && session.state !== 'AWAITING_MEDIA') return;
 
   const { textOnly, buttons } = parseButtonsBlock(text);
   const plainText = textOnly.trim();
@@ -320,22 +336,21 @@ bot.on('message', async (msg) => {
     if (session.state === 'AWAITING_SPOILER') finalHtml = `<tg-spoiler>${escapeHtml(plainText)}</tg-spoiler>`;
     try {
       await bot.sendMessage(CHANNEL_ID, finalHtml, { parse_mode: 'HTML', reply_markup: replyMarkup, disable_web_page_preview: true });
-      await cleanUserMessages(chatId, uid);
       resetSession(uid);
-      await renderMenu(chatId, uid, `✅ <b>সফলভাবে পোস্ট হয়েছে!</b>`, MAIN_MENU);
+      await updateMenu(chatId, uid, `✅ <b>সফলভাবে চ্যানেলে পোস্ট হয়েছে!</b>\n\nনতুন কাজ নির্বাচন করুন:`, MAIN_MENU);
     } catch (e) {
-      await cleanUserMessages(chatId, uid);
-      await renderMenu(chatId, uid, `❌ <b>Error</b>`, MAIN_MENU);
+      await updateMenu(chatId, uid, `❌ <b>Error:</b> HTML ফরম্যাট ভুল হতে পারে।`, MAIN_MENU);
     }
     return;
   }
 
+  // Handle Styled Text
   if (session.state === 'AWAITING_TEXT') {
     let htmlBlock;
     if (session.selectedStyle === 'link') {
       const parts = plainText.split('|').map(p => p.trim());
       if (!parts[0] || !parts[1]) {
-        await cleanUserMessages(chatId, uid);
+        await updateMenu(chatId, uid, `⚠️ লিংক এর ফরম্যাট ভুল। সঠিক ফরম্যাট: <code>Text | https://link.com</code>`, CANCEL_MENU);
         return;
       }
       let url = parts[1];
@@ -349,18 +364,15 @@ bot.on('message', async (msg) => {
       session.draftBlocks.push(htmlBlock);
       if (buttons.length) session.draftButtons = buttons;
       session.state = 'IDLE';
-      await cleanUserMessages(chatId, uid);
-      await renderMenu(chatId, uid, `🧱 <b>Block #${session.draftBlocks.length} Added!</b>`, getStyleMenu(session));
+      await updateMenu(chatId, uid, `🧱 <b>Block #${session.draftBlocks.length} যুক্ত হয়েছে!</b>\nআরও ব্লক যোগ করুন অথবা পাবলিশ করুন:`, getStyleMenu(session));
     } 
     else if (session.mode === 'quick') {
       try {
         await bot.sendMessage(CHANNEL_ID, htmlBlock, { parse_mode: 'HTML', reply_markup: replyMarkup, disable_web_page_preview: true });
-        await cleanUserMessages(chatId, uid);
         resetSession(uid);
-        await renderMenu(chatId, uid, `✅ <b>সফলভাবে পোস্ট হয়েছে!</b>`, MAIN_MENU);
+        await updateMenu(chatId, uid, `✅ <b>সফলভাবে চ্যানেলে পোস্ট হয়েছে!</b>`, MAIN_MENU);
       } catch (e) {
-        await cleanUserMessages(chatId, uid);
-        await renderMenu(chatId, uid, `❌ <b>Error</b>`, MAIN_MENU);
+        await updateMenu(chatId, uid, `❌ <b>Error:</b> পোস্ট করতে সমস্যা হয়েছে।`, MAIN_MENU);
       }
     }
     else if (session.mode === 'media_caption') {
@@ -368,16 +380,11 @@ bot.on('message', async (msg) => {
         const opts = { caption: htmlBlock, parse_mode: 'HTML', reply_markup: replyMarkup };
         if (session.mediaType === 'photo') await bot.sendPhoto(CHANNEL_ID, session.mediaId, opts);
         else await bot.sendVideo(CHANNEL_ID, session.mediaId, opts);
-        await cleanUserMessages(chatId, uid);
         resetSession(uid);
-        await renderMenu(chatId, uid, `✅ <b>সফলভাবে পোস্ট হয়েছে!</b>`, MAIN_MENU);
+        await updateMenu(chatId, uid, `✅ <b>সফলভাবে ছবি/ভিডিও চ্যানেলে পোস্ট হয়েছে!</b>`, MAIN_MENU);
       } catch (e) {
-        await cleanUserMessages(chatId, uid);
-        await renderMenu(chatId, uid, `❌ <b>Error</b>`, MAIN_MENU);
+        await updateMenu(chatId, uid, `❌ <b>Error:</b> পোস্ট করতে সমস্যা হয়েছে।`, MAIN_MENU);
       }
     }
-    return;
   }
-
-  await cleanUserMessages(chatId, uid);
 });

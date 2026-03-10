@@ -1,96 +1,185 @@
+'use strict';
+
 require('dotenv').config();
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 
+// ---------------- CONFIG ----------------
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const CHANNEL_ID = process.env.CHANNEL_ID;       
-const OWNER_ID = Number(process.env.OWNER_ID);   
-const PORT = process.env.PORT || 3000;
+const CHANNEL_ID = process.env.CHANNEL_ID;
+const PORT = Number(process.env.PORT || 3000);
+const GHOST_MODE = String(process.env.GHOST_MODE ?? 'true').toLowerCase() === 'true';
 
-if (!BOT_TOKEN || !CHANNEL_ID || !OWNER_ID) {
-  console.error("Missing Environment Variables!");
+// Allow multiple owners: OWNER_IDS=1,2,3 OR fallback OWNER_ID
+const OWNER_IDS = (process.env.OWNER_IDS || process.env.OWNER_ID || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+  .map(Number)
+  .filter(n => Number.isFinite(n));
+
+if (!BOT_TOKEN || !CHANNEL_ID || OWNER_IDS.length === 0) {
+  console.error('Missing Environment Variables! Required: BOT_TOKEN, CHANNEL_ID, OWNER_IDS/OWNER_ID');
   process.exit(1);
 }
 
-// Dummy Express Server
-const app = express();
-app.get('/', (req, res) => res.send('Channel Manager Pro Bot is Online & Running Smoothly.'));
-app.listen(PORT);
-
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-bot.setMyCommands([{ command: '/start', description: 'Main Menu / Restart Bot' }]);
-
-// --- SESSION MANAGEMENT ---
-const sessions = {};
-
-function getSession(uid) {
-  if (!sessions[uid]) {
-    sessions[uid] = defaultSession();
-  }
-  return sessions[uid];
+function isOwner(uid) {
+  return OWNER_IDS.includes(uid);
 }
+
+// ---------------- EXPRESS (Health) ----------------
+const app = express();
+app.get('/', (req, res) => res.send('Channel Manager Pro Bot is Online.'));
+app.listen(PORT, () => console.log(`Health server running on :${PORT}`));
+
+// ---------------- BOT ----------------
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+
+bot.on('polling_error', (err) => console.error('Polling error:', err?.message || err));
+process.on('unhandledRejection', (e) => console.error('UnhandledRejection:', e));
+process.on('uncaughtException', (e) => console.error('UncaughtException:', e));
+
+bot.setMyCommands([
+  { command: 'start', description: 'Open Main Menu / Restart' },
+  { command: 'menu', description: 'Open Main Menu' },
+  { command: 'cancel', description: 'Cancel current operation' },
+]);
+
+// ---------------- SESSION ----------------
+const STATES = Object.freeze({
+  IDLE: 'IDLE',
+  WAIT_MEDIA: 'WAIT_MEDIA',
+  WAIT_STYLE: 'WAIT_STYLE',
+  WAIT_TEXT: 'WAIT_TEXT',
+  WAIT_RAW: 'WAIT_RAW',
+  WAIT_SPOILER: 'WAIT_SPOILER',
+  WAIT_REPOST: 'WAIT_REPOST',
+  WAIT_CONFIRM: 'WAIT_CONFIRM',
+});
+
+const sessions = Object.create(null);
 
 function defaultSession() {
   return {
-    state: 'IDLE',          // IDLE, WAIT_MEDIA, WAIT_STYLE, WAIT_TEXT, WAIT_RAW, WAIT_REPOST
-    mode: null,             // quick, multi, media
+    chatId: null,
+
+    state: STATES.IDLE,
+    mode: null, // quick, multi, media, raw, spoiler, repost
     selectedStyle: 'normal',
-    postType: 'text',       // text, photo, video
+
+    postType: 'text', // text, photo, video, document, audio, voice, animation, sticker, video_note, album
     mediaId: null,
+
+    // Album buffer (photo/video only)
+    album: { id: null, items: [], timer: null },
+    mediaAlbumItems: null, // finalized array for sendMediaGroup
+
+    // multi-block draft
     draftBlocks: [],
     draftButtons: [],
-    lastMenuMsgId: null
+
+    // confirmation payload
+    pending: null, // { kind:'text'|'media'|'album', html, buttons, postType, mediaId, items, rawHtml, previewHtmlMode }
+
+    // UI
+    lastMenuMsgId: null,
   };
 }
 
-function resetSession(uid, keepMenuId = true) {
-  const lastId = sessions[uid]?.lastMenuMsgId;
-  sessions[uid] = defaultSession();
-  if (keepMenuId) sessions[uid].lastMenuMsgId = lastId;
+function getSession(uid) {
+  if (!sessions[uid]) sessions[uid] = defaultSession();
+  return sessions[uid];
 }
 
-// --- UTILITIES ---
+function clearAlbumTimer(session) {
+  if (session?.album?.timer) {
+    clearTimeout(session.album.timer);
+    session.album.timer = null;
+  }
+}
+
+function resetSession(uid, keepMenuId = true) {
+  const last = sessions[uid]?.lastMenuMsgId ?? null;
+  const chatId = sessions[uid]?.chatId ?? null;
+  clearAlbumTimer(sessions[uid]);
+
+  sessions[uid] = defaultSession();
+  if (keepMenuId) sessions[uid].lastMenuMsgId = last;
+  sessions[uid].chatId = chatId;
+}
+
+// ---------------- UTILITIES ----------------
 function escapeHtml(text) {
-  if (!text) return '';
-  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  if (text === undefined || text === null) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 async function safeDelete(chatId, msgId) {
-  try { await bot.deleteMessage(chatId, msgId); } catch (e) { /* Ignore */ }
+  try { await bot.deleteMessage(chatId, msgId); } catch (_) {}
 }
 
-function parseButtonsBlock(text) {
-  if (!text) return { textOnly: '', buttons: [] };
-  const idx = text.lastIndexOf('BUTTONS:');
-  if (idx === -1) return { textOnly: text, buttons: [] };
-  
-  const before = text.slice(0, idx).trim();
-  const block = text.slice(idx + 'BUTTONS:'.length).trim();
-  const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
-  
+function normalizeUrl(url) {
+  let u = String(url || '').trim();
+  if (!u) return null;
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  try {
+    const parsed = new URL(u);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * BUTTONS parsing rule (safe):
+ * - Must contain a line exactly: BUTTONS:
+ * - After that: each line -> a row, "||" splits buttons in row
+ * - Button format: Text | URL
+ */
+function parseButtonsBlock(inputText) {
+  const raw = String(inputText || '');
+  const lines = raw.split('\n');
+
+  const markerIndex = lines.findIndex(l => l.trim().toUpperCase() === 'BUTTONS:');
+  if (markerIndex === -1) return { textOnly: raw.trim(), buttons: [] };
+
+  const textOnly = lines.slice(0, markerIndex).join('\n').trim();
+  const btnLines = lines.slice(markerIndex + 1).map(l => l.trim()).filter(Boolean);
+
   const buttons = [];
-  for (const line of lines) {
-    const rowButtons = line.split('||').map(b => b.trim());
+  for (const line of btnLines) {
+    const rowButtons = line.split('||').map(b => b.trim()).filter(Boolean);
     const row = [];
+
     for (const btn of rowButtons) {
       const parts = btn.split('|').map(p => p.trim());
-      if (parts.length >= 2 && /^https?:\/\//i.test(parts[1])) {
-        row.push({ text: parts[0], url: parts[1] });
-      }
+      if (parts.length < 2) continue;
+      const label = parts[0];
+      const url = normalizeUrl(parts[1]);
+      if (!label || !url) continue;
+      row.push({ text: label.slice(0, 64), url });
     }
-    if (row.length > 0) buttons.push(row);
+
+    if (row.length) buttons.push(row);
   }
-  return { textOnly: before, buttons };
+
+  return { textOnly, buttons };
 }
 
-// --- HTML BUILDER (PREMIUM STYLES) ---
+// ---------------- HTML BUILDER ----------------
 function buildStyledHtml(style, plainText) {
-  const safe = escapeHtml(plainText || '');
-  const lines = (plainText || '').split('\n').map(l => l.trim()).filter(Boolean);
-  
+  const text = String(plainText || '');
+  const safe = escapeHtml(text);
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
   switch (style) {
     case 'normal':       return safe;
-    case 'title':        return `🏆 <b>${safe.toUpperCase()}</b>\n━━━━━━━━━━━━━━━━━`;
+    case 'title':        return `🏆 <b>${escapeHtml(text.toUpperCase())}</b>\n━━━━━━━━━━━━━━━━━`;
     case 'bold':         return `<b>${safe}</b>`;
     case 'italic':       return `<i>${safe}</i>`;
     case 'underline':    return `<u>${safe}</u>`;
@@ -102,344 +191,782 @@ function buildStyledHtml(style, plainText) {
     case 'expand_quote': return `<blockquote expandable>${safe}</blockquote>`;
     case 'heading':      return `🔹 <b>${safe}</b>\n──────────────`;
     case 'bullets':      return lines.map(l => `• ${escapeHtml(l)}`).join('\n');
-    case 'numbered':     return lines.map((l, i) => `<b>${i+1}.</b> ${escapeHtml(l)}`).join('\n');
+    case 'numbered':     return lines.map((l, i) => `<b>${i + 1}.</b> ${escapeHtml(l)}`).join('\n');
     case 'pros':         return lines.map(l => `✅ ${escapeHtml(l)}`).join('\n');
     case 'cons':         return lines.map(l => `❌ ${escapeHtml(l)}`).join('\n');
     case 'note':         return `📌 <b>Note:</b> ${safe}`;
     case 'warning':      return `⚠️ <b>Warning:</b> ${safe}`;
-    case 'signature':    return `\n<i>— ${safe}</i>`;
+    case 'signature':    return `<i>— ${safe}</i>`;
     default:             return safe;
   }
 }
 
-// --- MENUS ---
+// ---------------- MENUS ----------------
 const MAIN_MENU = {
   inline_keyboard: [
-    [{ text: '⚡ Quick Mode', callback_data: 'mode_quick' }, { text: '🧱 Multi-Block Mode', callback_data: 'mode_multi' }],
-    [{ text: '🖼️ Media (Photo/Video)', callback_data: 'mode_media' }],
-    [{ text: '📝 Raw HTML', callback_data: 'mode_raw' }, { text: '😶‍🌫️ Secret Spoiler', callback_data: 'mode_spoiler' }],
-    [{ text: '🔄 Repost Message', callback_data: 'mode_repost' }],
-    [{ text: '❌ Refresh / Reset Bot', callback_data: 'reset' }]
-  ]
+    [
+      { text: '⚡ Quick Text', callback_data: 'mode_quick' },
+      { text: '🧱 Multi-Block', callback_data: 'mode_multi' },
+    ],
+    [{ text: '📎 Media / File / Album', callback_data: 'mode_media' }],
+    [
+      { text: '📝 Raw HTML', callback_data: 'mode_raw' },
+      { text: '😶‍🌫️ Spoiler', callback_data: 'mode_spoiler' },
+    ],
+    [{ text: '🔄 Repost / Copy Message', callback_data: 'mode_repost' }],
+    [{ text: '❌ Reset', callback_data: 'reset' }],
+  ],
 };
 
 const CANCEL_MENU = {
-  inline_keyboard: [[{ text: '🔙 Cancel & Go Back', callback_data: 'cancel' }]]
+  inline_keyboard: [[{ text: '🔙 Cancel', callback_data: 'cancel' }]],
+};
+
+const CONFIRM_MENU = {
+  inline_keyboard: [
+    [
+      { text: '✅ Publish', callback_data: 'confirm_publish' },
+      { text: '✏️ Edit', callback_data: 'confirm_edit' },
+    ],
+    [{ text: '🔙 Cancel', callback_data: 'cancel' }],
+  ],
 };
 
 const STYLES = [
   { id: 'normal', text: 'Normal 🔤' },      { id: 'title', text: '🏆 Title' },
-  { id: 'bold', text: '𝗕𝗼𝗹𝗱' },             { id: 'italic', text: '𝙄𝙩𝙖𝙡𝙞𝙘' },
-  { id: 'underline', text: 'U̲n̲d̲e̲r̲l̲i̲n̲e̲' },    { id: 'strike', text: 'S̶t̶r̶i̶k̶e̶' },
-  { id: 'heading', text: '🔹 Heading' },    { id: 'quote', text: '❝ Quote' },
+  { id: 'bold', text: 'Bold' },            { id: 'italic', text: 'Italic' },
+  { id: 'underline', text: 'Underline' },  { id: 'strike', text: 'Strike' },
+  { id: 'heading', text: '🔹 Heading' },   { id: 'quote', text: '❝ Quote' },
   { id: 'expand_quote', text: '📖 Exp. Quote' }, { id: 'spoiler', text: '🌫️ Spoiler' },
-  { id: 'code', text: '𝙲𝚘𝚍𝚎 (Copy)' },      { id: 'pre', text: '💻 Code Block' },
-  { id: 'bullets', text: '• Bullets' },     { id: 'numbered', text: '1️⃣ Numbered' },
-  { id: 'pros', text: '✅ Pros' },          { id: 'cons', text: '❌ Cons' },
-  { id: 'note', text: '📌 Note' },          { id: 'warning', text: '⚠️ Warning' },
-  { id: 'link', text: '🔗 Text Link' },     { id: 'signature', text: '✍️ Signature' }
+  { id: 'code', text: 'Code (Inline)' },   { id: 'pre', text: 'Code Block' },
+  { id: 'bullets', text: '• Bullets' },    { id: 'numbered', text: '1️⃣ Numbered' },
+  { id: 'pros', text: '✅ Pros' },         { id: 'cons', text: '❌ Cons' },
+  { id: 'note', text: '📌 Note' },         { id: 'warning', text: '⚠️ Warning' },
+  { id: 'link', text: '🔗 Text Link' },    { id: 'signature', text: '✍️ Signature' },
 ];
 
 function getStyleMenu(session) {
   const keyboard = [];
-  
-  // Custom action for Media Mode
-  if (session.mode === 'media') {
+
+  const hasMedia = Boolean(session.mediaId) || Boolean(session.mediaAlbumItems);
+  if (session.mode === 'media' && hasMedia) {
     keyboard.push([{ text: '🚀 Skip Caption (Direct Post)', callback_data: 'action_skip_caption' }]);
   }
 
-  // Populate Styles
   for (let i = 0; i < STYLES.length; i += 2) {
     keyboard.push([
       { text: STYLES[i].text, callback_data: `style_${STYLES[i].id}` },
-      ...(STYLES[i+1] ? [{ text: STYLES[i+1].text, callback_data: `style_${STYLES[i+1].id}` }] : [])
+      ...(STYLES[i + 1] ? [{ text: STYLES[i + 1].text, callback_data: `style_${STYLES[i + 1].id}` }] : []),
     ]);
   }
-  
-  // Custom actions for Multi Mode
-  if (session.mode === 'multi' && session.draftBlocks.length > 0) {
-    keyboard.push([{ text: `🚀 Publish Now (${session.draftBlocks.length} Blocks ready)`, callback_data: 'action_publish' }]);
-    keyboard.push([{ text: `🗑️ Clear Draft`, callback_data: 'action_clear_draft' }]);
+
+  if (session.mode === 'multi') {
+    if (session.draftBlocks.length > 0) {
+      keyboard.push([{ text: `↩️ Undo Last (Now: ${session.draftBlocks.length})`, callback_data: 'action_undo_last' }]);
+      keyboard.push([{ text: `🗑️ Clear Draft`, callback_data: 'action_clear_draft' }]);
+      keyboard.push([{ text: `🚀 Publish (${session.draftBlocks.length} blocks)`, callback_data: 'action_publish' }]);
+    }
   }
-  
+
   keyboard.push([{ text: '🔙 Cancel', callback_data: 'cancel' }]);
   return { inline_keyboard: keyboard };
 }
 
-// --- UI UPDATER (The Core Fix for "Abnormal" Behavior) ---
+// ---------------- UI UPDATER ----------------
 async function updateUI(chatId, uid, text, markup) {
   const session = getSession(uid);
-  
+
+  const payload = {
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    ...(markup ? { reply_markup: markup } : {}),
+  };
+
   if (session.lastMenuMsgId) {
     try {
       await bot.editMessageText(text, {
         chat_id: chatId,
         message_id: session.lastMenuMsgId,
-        parse_mode: 'HTML',
-        reply_markup: markup,
-        disable_web_page_preview: true
+        ...payload,
       });
-      return; // Successfully edited
+      return;
     } catch (err) {
-      const errMsg = err.response?.body?.description || "";
-      // If Telegram says exactly the same, do nothing. It's not a bug.
-      if (errMsg.includes('exactly the same') || errMsg.includes('not modified')) {
-        return; 
-      }
-      // If message is too old or deleted, we delete from record and send a new one below
+      const desc = err?.response?.body?.description || '';
+      if (desc.includes('not modified') || desc.includes('exactly the same')) return;
       await safeDelete(chatId, session.lastMenuMsgId);
+      session.lastMenuMsgId = null;
     }
   }
 
-  // Send a completely new menu message
-  try {
-    const sentMsg = await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: markup, disable_web_page_preview: true });
-    session.lastMenuMsgId = sentMsg.message_id;
-  } catch (e) {
-    console.error("Failed to send UI:", e);
+  const sent = await bot.sendMessage(chatId, text, payload);
+  session.lastMenuMsgId = sent.message_id;
+}
+
+// ---------------- PUBLISH HELPERS ----------------
+async function sendLongTextToChannel(html, replyMarkup) {
+  const MAX = 4096;
+  if (html.length <= MAX) {
+    return bot.sendMessage(CHANNEL_ID, html, {
+      parse_mode: 'HTML',
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      disable_web_page_preview: true,
+    });
+  }
+
+  const parts = html.split(/\n{2,}/g).filter(Boolean);
+  if (parts.length <= 1) throw new Error('Message too long to send safely.');
+
+  for (let i = 0; i < parts.length; i++) {
+    const chunk = parts[i];
+    if (chunk.length > MAX) throw new Error('A block is too long to send.');
+    await bot.sendMessage(CHANNEL_ID, chunk, {
+      parse_mode: 'HTML',
+      ...(i === parts.length - 1 && replyMarkup ? { reply_markup: replyMarkup } : {}),
+      disable_web_page_preview: true,
+    });
   }
 }
 
-// --- COMMAND: /start ---
-bot.onText(/^\/start$/, async (msg) => {
-  const uid = msg.from.id;
-  if (uid !== OWNER_ID) return;
-  const chatId = msg.chat.id;
-  
-  await safeDelete(chatId, msg.message_id); // Delete user's command
-  resetSession(uid, false); 
-  
-  await updateUI(chatId, uid, `👑 <b>Channel Manager Pro v3.0</b>\n\nস্বাগতম! আপনার চ্যানেল ম্যানেজ করার জন্য নিচের মেনু থেকে একটি অপশন নির্বাচন করুন:`, MAIN_MENU);
+function mediaCaptionLimit(postType) {
+  // Most captioned media types have 1024 caption limit
+  // sticker/video_note have no caption
+  const noCaption = ['sticker', 'video_note'];
+  if (noCaption.includes(postType)) return 0;
+  return 1024;
+}
+
+async function sendSingleMedia(postType, mediaId, htmlCaption, buttons) {
+  const limit = mediaCaptionLimit(postType);
+  const hasCaption = Boolean(htmlCaption && htmlCaption.trim());
+  const captionTooLong = hasCaption && limit > 0 && htmlCaption.length > limit;
+
+  // If caption too long: send media without caption + then send text (with buttons)
+  if (captionTooLong) {
+    await sendSingleMedia(postType, mediaId, '', null);
+    await sendLongTextToChannel(htmlCaption, buttons);
+    return;
+  }
+
+  const optsWithCaption = (limit > 0 && hasCaption)
+    ? { caption: htmlCaption, parse_mode: 'HTML' }
+    : {};
+
+  const opts = {
+    ...optsWithCaption,
+    ...(buttons ? { reply_markup: buttons } : {}),
+    disable_web_page_preview: true,
+  };
+
+  switch (postType) {
+    case 'photo':      return bot.sendPhoto(CHANNEL_ID, mediaId, opts);
+    case 'video':      return bot.sendVideo(CHANNEL_ID, mediaId, opts);
+    case 'document':   return bot.sendDocument(CHANNEL_ID, mediaId, opts);
+    case 'audio':      return bot.sendAudio(CHANNEL_ID, mediaId, opts);
+    case 'voice':      return bot.sendVoice(CHANNEL_ID, mediaId, opts);
+    case 'animation':  return bot.sendAnimation(CHANNEL_ID, mediaId, opts);
+    case 'sticker':    return bot.sendSticker(CHANNEL_ID, mediaId, { ...(buttons ? { reply_markup: buttons } : {}) });
+    case 'video_note': return bot.sendVideoNote(CHANNEL_ID, mediaId, { ...(buttons ? { reply_markup: buttons } : {}) });
+    default:
+      throw new Error(`Unsupported media type: ${postType}`);
+  }
+}
+
+async function sendAlbum(items, htmlCaption, buttons) {
+  // Telegram limitation: sendMediaGroup DOES NOT support reply_markup
+  // so if buttons exist -> send album, then send separate text message with buttons
+  const hasButtons = Boolean(buttons);
+  const hasCaption = Boolean(htmlCaption && htmlCaption.trim());
+
+  if (hasButtons) {
+    // Send album without caption, then send caption text with buttons
+    await bot.sendMediaGroup(CHANNEL_ID, items.map(it => ({ type: it.type, media: it.media })));
+
+    const textToSend = hasCaption ? htmlCaption : '🔗';
+    await sendLongTextToChannel(textToSend, buttons);
+    return;
+  }
+
+  // No buttons: try caption on first item
+  const CAPTION_MAX = 1024;
+  if (hasCaption && htmlCaption.length > CAPTION_MAX) {
+    await bot.sendMediaGroup(CHANNEL_ID, items.map(it => ({ type: it.type, media: it.media })));
+    await sendLongTextToChannel(htmlCaption, null);
+    return;
+  }
+
+  const mediaPayload = items.map((it, idx) => {
+    if (idx === 0 && hasCaption) {
+      return { type: it.type, media: it.media, caption: htmlCaption, parse_mode: 'HTML' };
+    }
+    return { type: it.type, media: it.media };
+  });
+
+  await bot.sendMediaGroup(CHANNEL_ID, mediaPayload);
+}
+
+async function publishPending(session) {
+  const p = session.pending;
+  if (!p) throw new Error('No pending payload.');
+
+  if (p.kind === 'text') {
+    await sendLongTextToChannel(p.html, p.buttons);
+    return;
+  }
+
+  if (p.kind === 'media') {
+    await sendSingleMedia(p.postType, p.mediaId, p.html || '', p.buttons);
+    return;
+  }
+
+  if (p.kind === 'album') {
+    await sendAlbum(p.items, p.html || '', p.buttons);
+    return;
+  }
+
+  throw new Error('Unknown pending kind.');
+}
+
+function renderPendingPreview(session) {
+  const p = session.pending;
+  if (!p) return 'No preview available.';
+
+  if (p.kind === 'album') {
+    const btnHint = p.buttons ? `Buttons: ✅ (will be sent as separate message)` : `Buttons: ❌`;
+    const capHint = p.html?.trim() ? 'Caption: ✅' : 'Caption: ❌';
+    return `🧾 <b>Preview (Album)</b>\n\nItems: <b>${p.items.length}</b>\n${capHint}\n${btnHint}`;
+  }
+
+  if (p.previewHtmlMode) {
+    const btnHint = p.buttons ? `\n\n<i>Buttons:</i> ✅` : `\n\n<i>Buttons:</i> ❌`;
+    return `🧾 <b>Preview</b>\n\n${p.html}${btnHint}`;
+  }
+
+  return `🧾 <b>Preview (Raw)</b>\n\n<pre>${escapeHtml(p.rawHtml || '')}</pre>`;
+}
+
+// ---------------- MEDIA EXTRACTORS ----------------
+function extractSingleMedia(msg) {
+  if (msg.photo) {
+    const file_id = msg.photo[msg.photo.length - 1].file_id;
+    return { postType: 'photo', mediaId: file_id };
+  }
+  if (msg.video) return { postType: 'video', mediaId: msg.video.file_id };
+  if (msg.document) return { postType: 'document', mediaId: msg.document.file_id };
+  if (msg.audio) return { postType: 'audio', mediaId: msg.audio.file_id };
+  if (msg.voice) return { postType: 'voice', mediaId: msg.voice.file_id };
+  if (msg.animation) return { postType: 'animation', mediaId: msg.animation.file_id };
+  if (msg.sticker) return { postType: 'sticker', mediaId: msg.sticker.file_id };
+  if (msg.video_note) return { postType: 'video_note', mediaId: msg.video_note.file_id };
+  return null;
+}
+
+function extractAlbumItem(msg) {
+  // Telegram albums typically support photo/video
+  if (msg.photo) {
+    const file_id = msg.photo[msg.photo.length - 1].file_id;
+    return { type: 'photo', media: file_id };
+  }
+  if (msg.video) {
+    return { type: 'video', media: msg.video.file_id };
+  }
+  return null;
+}
+
+function scheduleFinalizeAlbum(uid) {
+  const session = getSession(uid);
+  const chatId = session.chatId;
+  if (!chatId) return;
+
+  clearAlbumTimer(session);
+  session.album.timer = setTimeout(async () => {
+    try {
+      const items = session.album.items.slice();
+      const count = items.length;
+
+      // finalize
+      session.mediaAlbumItems = items;
+      session.postType = 'album';
+      session.mediaId = null;
+
+      session.album.id = null;
+      session.album.items = [];
+      session.album.timer = null;
+
+      session.state = STATES.WAIT_STYLE;
+      await updateUI(
+        chatId,
+        uid,
+        `✅ <b>Album received!</b>\n\nItems: <b>${count}</b>\nএখন caption এর স্টাইল সিলেক্ট করুন, অথবা Skip Caption দিন:`,
+        getStyleMenu(session)
+      );
+    } catch (e) {
+      // ignore finalize errors
+      console.error('Album finalize error:', e);
+    }
+  }, 1200);
+}
+
+// ---------------- COMMANDS ----------------
+async function openMainMenu(chatId, uid, reset = true) {
+  const session = getSession(uid);
+  session.chatId = chatId;
+
+  if (reset) resetSession(uid, true);
+  getSession(uid).chatId = chatId;
+
+  await updateUI(
+    chatId,
+    uid,
+    `👑 <b>Channel Manager Pro (All-in-One)</b>\n\nমেনু থেকে একটি অপশন নির্বাচন করুন:`,
+    MAIN_MENU
+  );
+}
+
+bot.onText(/^\/start$/i, async (msg) => {
+  const uid = msg.from?.id;
+  if (!isOwner(uid)) return;
+  if (msg.chat.type !== 'private') return;
+
+  if (GHOST_MODE) await safeDelete(msg.chat.id, msg.message_id);
+  await openMainMenu(msg.chat.id, uid, true);
 });
 
-// --- BUTTON CLICKS (CALLBACK QUERIES) ---
+bot.onText(/^\/menu$/i, async (msg) => {
+  const uid = msg.from?.id;
+  if (!isOwner(uid)) return;
+  if (msg.chat.type !== 'private') return;
+
+  if (GHOST_MODE) await safeDelete(msg.chat.id, msg.message_id);
+  await openMainMenu(msg.chat.id, uid, false);
+});
+
+bot.onText(/^\/cancel$/i, async (msg) => {
+  const uid = msg.from?.id;
+  if (!isOwner(uid)) return;
+  if (msg.chat.type !== 'private') return;
+
+  if (GHOST_MODE) await safeDelete(msg.chat.id, msg.message_id);
+  resetSession(uid, true);
+  await updateUI(msg.chat.id, uid, `✅ Cancel করা হয়েছে।`, MAIN_MENU);
+});
+
+// ---------------- CALLBACK QUERIES ----------------
 bot.on('callback_query', async (query) => {
-  const uid = query.from.id;
-  if (uid !== OWNER_ID) {
-    return bot.answerCallbackQuery(query.id, { text: "⚠️ Not Authorized!", show_alert: true });
+  const uid = query.from?.id;
+  if (!isOwner(uid)) {
+    return bot.answerCallbackQuery(query.id, { text: 'Not authorized', show_alert: true });
   }
-  
-  const chatId = query.message.chat.id;
+
+  const msg = query.message;
+  if (!msg || msg.chat.type !== 'private') {
+    return bot.answerCallbackQuery(query.id, { text: 'Use in private chat', show_alert: true });
+  }
+
+  const chatId = msg.chat.id;
   const data = query.data;
   const session = getSession(uid);
+  session.chatId = chatId;
 
-  bot.answerCallbackQuery(query.id).catch(()=>{});
+  bot.answerCallbackQuery(query.id).catch(() => {});
 
-  // 1. Navigation & Cancels
   if (data === 'cancel' || data === 'reset') {
-    resetSession(uid);
-    await updateUI(chatId, uid, `🏠 <b>Main Menu</b>\n\nঅপারেশন বাতিল করা হয়েছে। নতুন করে অপশন নির্বাচন করুন:`, MAIN_MENU);
+    resetSession(uid, true);
+    await updateUI(chatId, uid, `🏠 <b>Main Menu</b>\n\nঅপারেশন বাতিল করা হয়েছে।`, MAIN_MENU);
     return;
   }
 
-  // 2. Main Menu Mode Selections
+  // Confirm flow
+  if (data === 'confirm_publish') {
+    try {
+      await publishPending(session);
+      resetSession(uid, true);
+      await updateUI(chatId, uid, `✅ <b>Published to channel successfully!</b>`, MAIN_MENU);
+    } catch (e) {
+      await updateUI(chatId, uid, `❌ <b>Publish failed:</b> ${escapeHtml(e.message || 'Unknown error')}`, CANCEL_MENU);
+    }
+    return;
+  }
+
+  if (data === 'confirm_edit') {
+    if (!session.mode) {
+      await openMainMenu(chatId, uid, true);
+      return;
+    }
+
+    if (session.mode === 'raw') {
+      session.state = STATES.WAIT_RAW;
+      session.pending = null;
+      await updateUI(chatId, uid, `📝 <b>Raw HTML</b>\n\nআবার HTML পাঠান:`, CANCEL_MENU);
+      return;
+    }
+
+    if (session.mode === 'spoiler') {
+      session.state = STATES.WAIT_SPOILER;
+      session.pending = null;
+      await updateUI(chatId, uid, `😶‍🌫️ <b>Spoiler</b>\n\nআবার টেক্সট পাঠান:`, CANCEL_MENU);
+      return;
+    }
+
+    if (session.mode === 'multi') {
+      session.state = STATES.WAIT_STYLE;
+      session.pending = null;
+      await updateUI(chatId, uid, `🧱 <b>Multi-Block</b>\n\nস্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
+      return;
+    }
+
+    // quick/media -> back to style selection
+    session.state = STATES.WAIT_STYLE;
+    session.pending = null;
+    await updateUI(chatId, uid, `🎨 স্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
+    return;
+  }
+
+  // Mode selection
   if (data.startsWith('mode_')) {
     const selectedMode = data.replace('mode_', '');
-    session.mode = selectedMode;
-    
+    resetSession(uid, true);
+    const s = getSession(uid);
+    s.chatId = chatId;
+    s.mode = selectedMode;
+
     if (selectedMode === 'quick') {
-      session.state = 'WAIT_STYLE';
-      session.postType = 'text';
-      await updateUI(chatId, uid, `⚡ <b>Quick Text Mode</b>\n\nটেক্সটের স্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
-    } 
-    else if (selectedMode === 'multi') {
-      session.state = 'WAIT_STYLE';
-      session.postType = 'text';
-      await updateUI(chatId, uid, `🧱 <b>Multi-Block Mode</b>\n(একাধিক স্টাইল একসাথে যুক্ত করুন)\n\nপ্রথম ব্লকের জন্য স্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
-    } 
-    else if (selectedMode === 'media') {
-      session.state = 'WAIT_MEDIA';
-      await updateUI(chatId, uid, `🖼️ <b>Media Mode</b>\n\nদয়া করে আপনার <b>Photo</b> অথবা <b>Video</b> টি এখানে সেন্ড করুন...`, CANCEL_MENU);
+      s.state = STATES.WAIT_STYLE;
+      s.postType = 'text';
+      await updateUI(chatId, uid, `⚡ <b>Quick Text</b>\n\nটেক্সটের স্টাইল সিলেক্ট করুন:`, getStyleMenu(s));
+      return;
     }
-    else if (selectedMode === 'raw') {
-      session.state = 'WAIT_RAW';
-      await updateUI(chatId, uid, `📝 <b>Raw HTML Mode</b>\n\nসরাসরি HTML কোড টাইপ করে সেন্ড করুন...`, CANCEL_MENU);
+
+    if (selectedMode === 'multi') {
+      s.state = STATES.WAIT_STYLE;
+      s.postType = 'text';
+      await updateUI(chatId, uid, `🧱 <b>Multi-Block Mode</b>\n\nপ্রথম ব্লকের স্টাইল সিলেক্ট করুন:`, getStyleMenu(s));
+      return;
     }
-    else if (selectedMode === 'spoiler') {
-      session.state = 'WAIT_SPOILER';
-      await updateUI(chatId, uid, `😶‍🌫️ <b>Secret Spoiler Mode</b>\n\nযে টেক্সটটি হাইড করে রাখতে চান সেটি সেন্ড করুন...`, CANCEL_MENU);
+
+    if (selectedMode === 'media') {
+      s.state = STATES.WAIT_MEDIA;
+      await updateUI(
+        chatId,
+        uid,
+        `📎 <b>Media/File/Album Mode</b>\n\nযেকোনো মিডিয়া পাঠান:\n• Photo/Video (single)\n• Photo/Video Album\n• Document (PDF/ZIP)\n• Audio/Voice\n• GIF (Animation)\n• Sticker / Video Note\n\nতারপর caption চাইলে স্টাইল সিলেক্ট করবেন।`,
+        CANCEL_MENU
+      );
+      return;
     }
-    else if (selectedMode === 'repost') {
-      session.state = 'WAIT_REPOST';
-      await updateUI(chatId, uid, `🔄 <b>Repost Mode</b>\n\nঅন্য কোনো চ্যানেল বা চ্যাট থেকে মেসেজটি ফরওয়ার্ড বা সেন্ড করুন...`, CANCEL_MENU);
+
+    if (selectedMode === 'raw') {
+      s.state = STATES.WAIT_RAW;
+      await updateUI(chatId, uid, `📝 <b>Raw HTML Mode</b>\n\nHTML পাঠান। Buttons দিতে চাইলে:\n<pre>BUTTONS:\nName | https://url</pre>`, CANCEL_MENU);
+      return;
     }
+
+    if (selectedMode === 'spoiler') {
+      s.state = STATES.WAIT_SPOILER;
+      await updateUI(chatId, uid, `😶‍🌫️ <b>Spoiler Mode</b>\n\nটেক্সট পাঠান:`, CANCEL_MENU);
+      return;
+    }
+
+    if (selectedMode === 'repost') {
+      s.state = STATES.WAIT_REPOST;
+      await updateUI(chatId, uid, `🔄 <b>Repost Mode</b>\n\nযে মেসেজ কপি করতে চান সেটি forward/send করুন:`, CANCEL_MENU);
+      return;
+    }
+
+    await openMainMenu(chatId, uid, true);
     return;
   }
 
-  // 3. Style Selection
+  // Style selection
   if (data.startsWith('style_')) {
     session.selectedStyle = data.replace('style_', '');
-    session.state = 'WAIT_TEXT';
-    
+    session.state = STATES.WAIT_TEXT;
+
     const styleName = STYLES.find(s => s.id === session.selectedStyle)?.text || session.selectedStyle;
-    
-    let instructions = `✏️ <b>Editor (${styleName})</b>\n\nএখন আপনার টেক্সট টাইপ করে সেন্ড করুন...`;
-    if(session.selectedStyle === 'link') {
-        instructions += `\n\n💡 <b>নিয়ম:</b> <code>Text | URL</code> ফরম্যাটে পাঠান।\nউদাহরণ: <code>Google | https://google.com</code>`;
+
+    let instructions = `✏️ <b>Editor (${escapeHtml(styleName)})</b>\n\nটেক্সট লিখে পাঠান।`;
+    if (session.selectedStyle === 'link') {
+      instructions += `\n\n<blockquote><b>ফরম্যাট:</b>\n<code>Text | https://example.com</code></blockquote>`;
     } else {
-        instructions += `\n\n💡 <i>বাটন যুক্ত করতে মেসেজের শেষে <code>BUTTONS: Name | URL</code> ব্যবহার করুন।</i>`;
+      instructions += `\n\n<blockquote><b>Buttons (optional):</b>\n<pre>BUTTONS:\nGoogle | https://google.com\nA | https://a.com || B | https://b.com</pre></blockquote>`;
     }
 
     await updateUI(chatId, uid, instructions, CANCEL_MENU);
     return;
   }
 
-  // 4. Custom Actions
-  if (data === 'action_publish') {
-    if (session.draftBlocks.length === 0) return;
-    const finalHtml = session.draftBlocks.join('\n\n');
-    const replyMarkup = session.draftButtons.length ? { inline_keyboard: session.draftButtons } : undefined;
-    try {
-      await bot.sendMessage(CHANNEL_ID, finalHtml, { parse_mode: 'HTML', reply_markup: replyMarkup, disable_web_page_preview: true });
-      resetSession(uid);
-      await updateUI(chatId, uid, `✅ <b>সফলভাবে পোস্ট পাবলিশ হয়েছে!</b> 🎉\n\nনতুন কিছু করতে চাইলে মেনু থেকে সিলেক্ট করুন:`, MAIN_MENU);
-    } catch (err) {
-      await updateUI(chatId, uid, `❌ <b>Error:</b> পোস্ট করতে ব্যর্থ হয়েছে। HTML ট্যাগে ভুল থাকতে পারে।`, getStyleMenu(session));
-    }
+  // Multi actions
+  if (data === 'action_undo_last') {
+    if (session.draftBlocks.length > 0) session.draftBlocks.pop();
+    if (session.draftBlocks.length === 0) session.draftButtons = [];
+    await updateUI(chatId, uid, `↩️ <b>Undo done.</b>\n\nস্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
     return;
   }
 
   if (data === 'action_clear_draft') {
     session.draftBlocks = [];
     session.draftButtons = [];
-    await updateUI(chatId, uid, `🗑️ <b>Draft Cleared!</b>\n\nনতুন করে ব্লক তৈরি করতে স্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
+    await updateUI(chatId, uid, `🗑️ <b>Draft Cleared.</b>\n\nস্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
     return;
   }
 
+  if (data === 'action_publish') {
+    if (session.draftBlocks.length === 0) return;
+
+    const finalHtml = session.draftBlocks.join('\n\n');
+    const buttons = session.draftButtons?.length ? { inline_keyboard: session.draftButtons } : null;
+
+    session.pending = { kind: 'text', html: finalHtml, buttons, previewHtmlMode: true };
+    session.state = STATES.WAIT_CONFIRM;
+
+    await updateUI(chatId, uid, renderPendingPreview(session), CONFIRM_MENU);
+    return;
+  }
+
+  // Media skip caption (single or album)
   if (data === 'action_skip_caption') {
-    try {
-      if (session.postType === 'photo') {
-          await bot.sendPhoto(CHANNEL_ID, session.mediaId);
-      } else {
-          await bot.sendVideo(CHANNEL_ID, session.mediaId);
-      }
-      resetSession(uid);
-      await updateUI(chatId, uid, `✅ <b>সফলভাবে ছবি/ভিডিও (ক্যাপশন ছাড়া) চ্যানেলে পোস্ট হয়েছে!</b> 🎉`, MAIN_MENU);
-    } catch (e) {
-      await updateUI(chatId, uid, `❌ <b>Error:</b> মিডিয়া পোস্ট করতে ব্যর্থ হয়েছে।`, CANCEL_MENU);
+    if (session.postType === 'album' && session.mediaAlbumItems?.length) {
+      session.pending = {
+        kind: 'album',
+        items: session.mediaAlbumItems,
+        html: '',
+        buttons: null,
+        previewHtmlMode: true,
+      };
+      session.state = STATES.WAIT_CONFIRM;
+      await updateUI(chatId, uid, renderPendingPreview(session), CONFIRM_MENU);
+      return;
     }
+
+    if (!session.mediaId || session.postType === 'text') {
+      await updateUI(chatId, uid, `⚠️ আগে media পাঠাতে হবে।`, CANCEL_MENU);
+      return;
+    }
+
+    session.pending = {
+      kind: 'media',
+      postType: session.postType,
+      mediaId: session.mediaId,
+      html: '',
+      buttons: null,
+      previewHtmlMode: true,
+    };
+    session.state = STATES.WAIT_CONFIRM;
+    await updateUI(chatId, uid, `🧾 <b>Preview</b>\n\nMedia will be posted <b>without caption</b>.`, CONFIRM_MENU);
     return;
   }
 });
 
-// --- MESSAGE HANDLER (TEXT, PHOTOS, VIDEOS) ---
+// ---------------- MESSAGE HANDLER ----------------
 bot.on('message', async (msg) => {
-  const uid = msg.from.id;
-  if (uid !== OWNER_ID) return;
-  if (msg.text && msg.text.startsWith('/start')) return; 
-  
+  const uid = msg.from?.id;
+  if (!isOwner(uid)) return;
+  if (msg.from?.is_bot) return;
+  if (msg.chat.type !== 'private') return;
+
+  if (msg.text && /^\/(start|menu|cancel)/i.test(msg.text)) return;
+
   const chatId = msg.chat.id;
   const session = getSession(uid);
-  
-  // Ghost Mode: Delete user's message to keep chat absolutely clean
-  await safeDelete(chatId, msg.message_id);
+  session.chatId = chatId;
 
-  if (session.state === 'IDLE') return;
+  if (session.state === STATES.IDLE) {
+    if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
+    return;
+  }
 
-  const rawText = msg.text || msg.caption || '';
-
-  // 1. Handling Repost
-  if (session.state === 'WAIT_REPOST') {
+  // Repost must copy BEFORE deleting
+  if (session.state === STATES.WAIT_REPOST) {
     try {
       await bot.copyMessage(CHANNEL_ID, chatId, msg.message_id);
-      resetSession(uid);
-      await updateUI(chatId, uid, `✅ <b>সফলভাবে কপি করে চ্যানেলে পাঠানো হয়েছে!</b>\n\nপরবর্তী কাজ নির্বাচন করুন:`, MAIN_MENU);
-    } catch (err) {
-      await updateUI(chatId, uid, `❌ <b>Error!</b> মেসেজ কপি করতে সমস্যা হয়েছে।`, CANCEL_MENU);
+      if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
+
+      resetSession(uid, true);
+      await updateUI(chatId, uid, `✅ <b>Copied to channel!</b>`, MAIN_MENU);
+    } catch (e) {
+      if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
+      await updateUI(chatId, uid, `❌ <b>Copy failed:</b> protected content / permission issue / invalid message.`, CANCEL_MENU);
     }
     return;
   }
 
-  // 2. Handling Media Upload
-  if (session.state === 'WAIT_MEDIA') {
-    if (msg.photo) {
-      session.mediaId = msg.photo[msg.photo.length - 1].file_id;
-      session.postType = 'photo';
-    } else if (msg.video) {
-      session.mediaId = msg.video.file_id;
-      session.postType = 'video';
-    } else {
-      await updateUI(chatId, uid, `⚠️ <b>ভুল ইনপুট!</b> দয়া করে শুধুমাত্র ছবি অথবা ভিডিও সেন্ড করুন।`, CANCEL_MENU);
+  // Media/File/Album receiving
+  if (session.state === STATES.WAIT_MEDIA) {
+    const groupId = msg.media_group_id;
+    if (groupId) {
+      const item = extractAlbumItem(msg);
+      if (!item) {
+        if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
+        await updateUI(chatId, uid, `⚠️ Album হিসেবে শুধু Photo/Video সাপোর্টেড।`, CANCEL_MENU);
+        return;
+      }
+
+      // store item
+      if (session.album.id !== groupId) {
+        clearAlbumTimer(session);
+        session.album.id = groupId;
+        session.album.items = [];
+      }
+      session.album.items.push(item);
+
+      if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
+
+      scheduleFinalizeAlbum(uid);
       return;
     }
-    session.state = 'WAIT_STYLE';
-    await updateUI(chatId, uid, `✅ <b>মিডিয়া গ্রহণ করা হয়েছে!</b>\n\nএখন এই ছবি/ভিডিওর ক্যাপশনের জন্য স্টাইল সিলেক্ট করুন, অথবা "Skip Caption" এ ক্লিক করুন:`, getStyleMenu(session));
+
+    const media = extractSingleMedia(msg);
+    if (!media) {
+      if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
+      await updateUI(chatId, uid, `⚠️ <b>ভুল ইনপুট</b>\nMedia/File পাঠান (photo/video/document/audio/voice/gif/sticker/video note)।`, CANCEL_MENU);
+      return;
+    }
+
+    session.mediaId = media.mediaId;
+    session.postType = media.postType;
+    session.mediaAlbumItems = null;
+
+    if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
+
+    // If media type doesn't support caption -> go confirm directly
+    if (['sticker', 'video_note'].includes(session.postType)) {
+      session.pending = {
+        kind: 'media',
+        postType: session.postType,
+        mediaId: session.mediaId,
+        html: '',
+        buttons: null,
+        previewHtmlMode: true,
+      };
+      session.state = STATES.WAIT_CONFIRM;
+      await updateUI(chatId, uid, `🧾 <b>Preview</b>\n\nThis media type has no caption.`, CONFIRM_MENU);
+      return;
+    }
+
+    session.state = STATES.WAIT_STYLE;
+    await updateUI(
+      chatId,
+      uid,
+      `✅ <b>Media received!</b>\n\nএখন caption এর স্টাইল সিলেক্ট করুন, অথবা Skip Caption দিন:`,
+      getStyleMenu(session)
+    );
     return;
   }
 
-  // Require text for remaining states
-  if (!rawText) {
-      await updateUI(chatId, uid, `⚠️ <b>টেক্সট পাওয়া যায়নি!</b> দয়া করে টেক্সট লিখে সেন্ড করুন।`, CANCEL_MENU);
-      return;
+  // For other modes, keep chat clean
+  if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
+
+  // Need text/caption for below
+  const rawText = msg.text || msg.caption || '';
+  if (!rawText.trim()) {
+    await updateUI(chatId, uid, `⚠️ <b>টেক্সট পাওয়া যায়নি</b>\nটেক্সট লিখে পাঠান।`, CANCEL_MENU);
+    return;
   }
 
   const { textOnly, buttons } = parseButtonsBlock(rawText);
   const plainText = textOnly.trim();
-  const replyMarkup = buttons.length ? { inline_keyboard: buttons } : undefined;
+  const replyMarkup = buttons.length ? { inline_keyboard: buttons } : null;
 
-  // 3. Handling Raw HTML & Spoilers
-  if (session.state === 'WAIT_RAW' || session.state === 'WAIT_SPOILER') {
-    let finalHtml = plainText;
-    if (session.state === 'WAIT_SPOILER') {
-        finalHtml = `<tg-spoiler>${escapeHtml(plainText)}</tg-spoiler>`;
-    }
-    try {
-      await bot.sendMessage(CHANNEL_ID, finalHtml, { parse_mode: 'HTML', reply_markup: replyMarkup, disable_web_page_preview: true });
-      resetSession(uid);
-      await updateUI(chatId, uid, `✅ <b>সফলভাবে চ্যানেলে পোস্ট হয়েছে!</b>\n\nনতুন কাজ নির্বাচন করুন:`, MAIN_MENU);
-    } catch (e) {
-      await updateUI(chatId, uid, `❌ <b>HTML Error:</b> আপনার দেওয়া ফরম্যাটে ভুল আছে বা ট্যাগগুলো সঠিকভাবে ক্লোজ করা হয়নি।`, CANCEL_MENU);
-    }
+  // Raw HTML / Spoiler -> Confirm
+  if (session.state === STATES.WAIT_RAW || session.state === STATES.WAIT_SPOILER) {
+    let finalHtml;
+    if (session.state === STATES.WAIT_SPOILER) finalHtml = `<tg-spoiler>${escapeHtml(plainText)}</tg-spoiler>`;
+    else finalHtml = plainText; // raw
+
+    session.pending = {
+      kind: 'text',
+      html: finalHtml,
+      rawHtml: plainText,
+      buttons: replyMarkup,
+      previewHtmlMode: session.state !== STATES.WAIT_RAW,
+    };
+    session.state = STATES.WAIT_CONFIRM;
+
+    await updateUI(chatId, uid, renderPendingPreview(session), CONFIRM_MENU);
     return;
   }
 
-  // 4. Handling Styled Text (Quick, Multi, Media Captions)
-  if (session.state === 'WAIT_TEXT') {
+  // Styled text (quick/multi/media caption)
+  if (session.state === STATES.WAIT_TEXT) {
+    if (!plainText) {
+      await updateUI(chatId, uid, `⚠️ <b>Empty text</b>`, CANCEL_MENU);
+      return;
+    }
+
     let htmlBlock;
-    
-    // Custom logic for Links
     if (session.selectedStyle === 'link') {
       const parts = plainText.split('|').map(p => p.trim());
       if (parts.length < 2) {
-        await updateUI(chatId, uid, `⚠️ <b>লিংক এর ফরম্যাট ভুল!</b>\nসঠিক নিয়ম: <code>টেক্সট | https://example.com</code>`, CANCEL_MENU);
+        await updateUI(chatId, uid, `⚠️ <b>Link format ভুল</b>\n<code>Text | https://example.com</code>`, CANCEL_MENU);
         return;
       }
-      let url = parts[1];
-      if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-      htmlBlock = `<a href="${escapeHtml(url)}">${escapeHtml(parts[0])}</a>`;
+      const label = parts[0];
+      const url = normalizeUrl(parts[1]);
+      if (!url) {
+        await updateUI(chatId, uid, `⚠️ <b>Invalid URL</b>`, CANCEL_MENU);
+        return;
+      }
+      htmlBlock = `<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>`;
     } else {
       htmlBlock = buildStyledHtml(session.selectedStyle, plainText);
     }
 
-    // Processing based on Mode
+    // Multi
     if (session.mode === 'multi') {
       session.draftBlocks.push(htmlBlock);
-      if (buttons.length) session.draftButtons = buttons; // Overwrites previous buttons with latest ones
-      session.state = 'WAIT_STYLE';
-      await updateUI(chatId, uid, `🧱 <b>Block #${session.draftBlocks.length} যুক্ত হয়েছে!</b>\n\nপরবর্তী ব্লকের স্টাইল সিলেক্ট করুন অথবা পাবলিশ করুন:`, getStyleMenu(session));
-    } 
-    else if (session.mode === 'quick' && session.postType === 'text') {
-      try {
-        await bot.sendMessage(CHANNEL_ID, htmlBlock, { parse_mode: 'HTML', reply_markup: replyMarkup, disable_web_page_preview: true });
-        resetSession(uid);
-        await updateUI(chatId, uid, `✅ <b>সফলভাবে চ্যানেলে পোস্ট হয়েছে!</b> 🎉`, MAIN_MENU);
-      } catch (e) {
-        await updateUI(chatId, uid, `❌ <b>Error:</b> পোস্ট করতে ব্যর্থ হয়েছে।`, CANCEL_MENU);
-      }
+      if (buttons.length) session.draftButtons = buttons;
+
+      session.state = STATES.WAIT_STYLE;
+      await updateUI(
+        chatId,
+        uid,
+        `🧱 <b>Block added!</b>\n\nবর্তমানে: <b>${session.draftBlocks.length}</b> blocks.\nপরবর্তী স্টাইল সিলেক্ট করুন অথবা Publish করুন:`,
+        getStyleMenu(session)
+      );
+      return;
     }
-    else if (session.mode === 'media' && session.postType !== 'text') {
-      try {
-        const opts = { caption: htmlBlock, parse_mode: 'HTML', reply_markup: replyMarkup };
-        if (session.postType === 'photo') {
-            await bot.sendPhoto(CHANNEL_ID, session.mediaId, opts);
-        } else {
-            await bot.sendVideo(CHANNEL_ID, session.mediaId, opts);
-        }
-        resetSession(uid);
-        await updateUI(chatId, uid, `✅ <b>সফলভাবে ছবি/ভিডিও চ্যানেলে পোস্ট হয়েছে!</b> 🎉`, MAIN_MENU);
-      } catch (e) {
-        await updateUI(chatId, uid, `❌ <b>Error:</b> মিডিয়া পোস্ট করতে ব্যর্থ হয়েছে। ক্যাপশন খুব বড় হতে পারে।`, CANCEL_MENU);
-      }
+
+    // Quick text -> confirm
+    if (session.mode === 'quick' && session.postType === 'text') {
+      session.pending = { kind: 'text', html: htmlBlock, buttons: replyMarkup, previewHtmlMode: true };
+      session.state = STATES.WAIT_CONFIRM;
+      await updateUI(chatId, uid, renderPendingPreview(session), CONFIRM_MENU);
+      return;
     }
+
+    // Media caption -> confirm (single or album)
+    if (session.mode === 'media') {
+      if (session.postType === 'album' && session.mediaAlbumItems?.length) {
+        session.pending = {
+          kind: 'album',
+          items: session.mediaAlbumItems,
+          html: htmlBlock,
+          buttons: replyMarkup,
+          previewHtmlMode: true,
+        };
+        session.state = STATES.WAIT_CONFIRM;
+        await updateUI(chatId, uid, renderPendingPreview(session), CONFIRM_MENU);
+        return;
+      }
+
+      if (!session.mediaId || session.postType === 'text') {
+        await updateUI(chatId, uid, `⚠️ আগে media পাঠাতে হবে।`, CANCEL_MENU);
+        return;
+      }
+
+      session.pending = {
+        kind: 'media',
+        postType: session.postType,
+        mediaId: session.mediaId,
+        html: htmlBlock,
+        buttons: replyMarkup,
+        previewHtmlMode: true,
+      };
+      session.state = STATES.WAIT_CONFIRM;
+
+      await updateUI(chatId, uid, `🧾 <b>Preview</b>\n\nCaption preview:\n\n${htmlBlock}`, CONFIRM_MENU);
+      return;
+    }
+
+    await updateUI(chatId, uid, `⚠️ Unknown flow. Reset করুন।`, MAIN_MENU);
   }
 });

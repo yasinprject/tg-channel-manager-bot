@@ -1,19 +1,11 @@
-// index.js
-// Clean Channel Manager Bot + Multi-style Draft
-// - Owner-only
-// - Quick Mode: ১ স্টাইল = ১ পোস্ট (আগের মতো)
-// - Multi Mode: /multi → এক পোস্টে একাধিক স্টাইল ব্লক → /publish
-// - Styles: normal, bold, italic, underline, strike, spoiler, code/copy (one-tap copy), pre, quote,
-//           heading, bullets, note, warning, success, info, link
-// - /post (raw HTML), /post_spoiler, /send (reply copy)
-
+// Clean Channel Manager Bot - Button Based UI
 require('dotenv').config();
 const express = require('express');
 const TelegramBot = require('node-telegram-bot-api');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const CHANNEL_ID = process.env.CHANNEL_ID;       // e.g. -1001234567890
-const OWNER_ID = Number(process.env.OWNER_ID);   // your user id
+const CHANNEL_ID = process.env.CHANNEL_ID;       
+const OWNER_ID = Number(process.env.OWNER_ID);   
 const PORT = process.env.PORT || 3000;
 
 if (!BOT_TOKEN || !CHANNEL_ID || !OWNER_ID) {
@@ -28,25 +20,42 @@ app.listen(PORT, () => console.log('🌐 Server on port', PORT));
 
 // ---------- Telegram bot ----------
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-console.log('🤖 Bot polling started');
+console.log('🤖 Button-Based Bot started');
+
+// ---------- Session Management ----------
+// User States: IDLE, AWAITING_TEXT, AWAITING_RAW, AWAITING_REPOST
+const sessions = {};
+
+function getSession(uid) {
+  if (!sessions[uid]) {
+    sessions[uid] = {
+      state: 'IDLE',
+      mode: null,          // 'quick' or 'multi'
+      selectedStyle: null, // 'bold', 'italic', etc.
+      draftBlocks: [],
+      draftButtons: [],
+      lastMenuMsgId: null  // To keep chat clean
+    };
+  }
+  return sessions[uid];
+}
+
+function resetSession(uid) {
+  const lastMsg = sessions[uid]?.lastMenuMsgId;
+  sessions[uid] = { state: 'IDLE', mode: null, selectedStyle: null, draftBlocks: [], draftButtons: [], lastMenuMsgId: lastMsg };
+}
 
 // ---------- Helpers ----------
-function isOwner(x) {
-  const id = x.from?.id ?? x.id ?? x.chat?.id;
+function isOwner(id) {
   return id === OWNER_ID;
 }
 
 function escapeHtml(t) {
   if (!t) return '';
-  return String(t)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function parseButtonsBlock(text) {
-  // BUTTONS:
-  // Label|https://...
   if (!text) return { textOnly: text, buttons: [] };
   const idx = text.lastIndexOf('BUTTONS:');
   if (idx === -1) return { textOnly: text, buttons: [] };
@@ -63,37 +72,19 @@ function parseButtonsBlock(text) {
   return { textOnly: before, buttons };
 }
 
-// ---------- Style session & Draft session ----------
-// styleSession: কোন স্টাইল সিলেক্ট করা আছে, পরের মেসেজ কীভাবে ধরবো
-//  userId -> { mode, awaitingText, isMulti }
-const styleSession = {};
-function setStyleSession(userId, mode, isMulti) {
-  styleSession[userId] = { mode, awaitingText: true, isMulti: !!isMulti };
-}
-function clearStyleSession(userId) {
-  delete styleSession[userId];
-}
-function getStyleSession(userId) {
-  return styleSession[userId];
-}
-
-// draftPosts: multi-mode এর ড্রাফট
-// userId -> { blocks: [htmlBlock1, htmlBlock2,...], buttons: [{text,url},...] }
-const draftPosts = {};
-function getDraft(userId) {
-  if (!draftPosts[userId]) {
-    draftPosts[userId] = { blocks: [], buttons: [] };
+async function cleanPreviousMenu(chatId, uid) {
+  const session = getSession(uid);
+  if (session.lastMenuMsgId) {
+    try {
+      await bot.deleteMessage(chatId, session.lastMenuMsgId);
+    } catch (e) { /* Ignore if already deleted */ }
   }
-  return draftPosts[userId];
-}
-function clearDraft(userId) {
-  delete draftPosts[userId];
 }
 
-// ---------- Styled HTML ----------
-function buildStyledHtml(mode, plainText) {
+// ---------- Styled HTML Builder ----------
+function buildStyledHtml(style, plainText) {
   const safe = escapeHtml(plainText || '');
-  switch (mode) {
+  switch (style) {
     case 'normal':   return safe;
     case 'bold':     return `<b>${safe}</b>`;
     case 'italic':   return `<i>${safe}</i>`;
@@ -101,17 +92,12 @@ function buildStyledHtml(mode, plainText) {
     case 'strike':   return `<s>${safe}</s>`;
     case 'spoiler':  return `<tg-spoiler>${safe}</tg-spoiler>`;
     case 'code':
-    case 'copy':     return `<code>${safe}</code>`; // tap-to-copy on text
+    case 'copy':     return `<code>${safe}</code>`;
     case 'pre':      return `<pre>${safe}</pre>`;
     case 'quote':    return `<blockquote>${safe}</blockquote>`;
     case 'heading':  return `🔹 <b>${safe}</b>\n──────────────`;
-    case 'bullets': {
-      const lines = (plainText || '')
-        .split('\n')
-        .map(l => l.trim())
-        .filter(Boolean);
-      return lines.map(l => `• ${escapeHtml(l)}`).join('\n');
-    }
+    case 'bullets': 
+      return (plainText || '').split('\n').map(l => l.trim()).filter(Boolean).map(l => `• ${escapeHtml(l)}`).join('\n');
     case 'note':     return `📌 <b>Note:</b> ${safe}`;
     case 'warning':  return `⚠️ <b>Warning:</b> ${safe}`;
     case 'success':  return `✅ <b>Success:</b> ${safe}`;
@@ -120,360 +106,264 @@ function buildStyledHtml(mode, plainText) {
   }
 }
 
-// ---------- /start ----------
-const commandListText = `normal - Normal style post
-bold - Bold style post
-italic - Italic style post
-underline - Underline style post
-strike - Strikethrough style post
-spoiler - Spoiler / blur style post
-code - Monospace (tap text to copy)
-copy - Same as code
-pre - Code block style post
-quote - Quote style post
-link - Clickable link post (title | https://...)
-heading - Heading/title style post
-bullets - Bullet list style post (each line)
-note - Note style template
-warning - Warning style template
-success - Success/OK style template
-info - Info/notice style template
-multi - Start multi-style draft
-publish - Send current multi-style draft
-cancelmulti - Cancel draft
-post - Raw HTML post
-post_spoiler - Raw spoiler post
-send - Copy replied message to channel`;
+// ---------- Keyboards ----------
+const MAIN_MENU = {
+  inline_keyboard: [
+    [{ text: '⚡ Quick Mode', callback_data: 'mode_quick' }, { text: '🧱 Multi Mode', callback_data: 'mode_multi' }],
+    [{ text: '📝 Post Raw HTML', callback_data: 'tool_raw' }, { text: '🔄 Repost Message', callback_data: 'tool_repost' }],
+    [{ text: '😶‍🌫️ Raw Spoiler', callback_data: 'tool_spoiler' }, { text: '❌ Cancel / Reset', callback_data: 'action_reset' }]
+  ]
+};
 
-bot.onText(/^\/start$/, (msg) => {
-  const chatId = msg.chat.id;
-  if (!isOwner(msg)) {
-    return bot.sendMessage(chatId, 'Hi! This bot is private (owner only).');
-  }
-
-  const text = `<b>Welcome to your Channel Manager bot 👑</b>
-
-<b>Quick Mode (১ স্টাইল = ১ পোস্ট):</b>
-1️⃣ 4-dot থেকে স্টাইল সিলেক্ট করুন (যেমন /bold, /heading, /copy)  
-2️⃣ পরের টেক্সট পাঠান  
-→ সাথে সাথে চ্যানেলে ঐ স্টাইলে পোস্ট হয়ে যাবে।
-
-<b>Multi Mode (এক পোস্টে অনেক স্টাইল):</b>
-/multi → নতুন ড্রাফট শুরু  
-→ এরপর বারবার স্টাইল সিলেক্ট + টেক্সট পাঠান (প্রতিটি টেক্সট একেকটা ব্লক)  
-→ ব্লকগুলো জমে থাকবে  
-শেষে /publish লিখুন → সব ব্লক একসাথে একটি পোস্ট হিসেবে চ্যানেলে যাবে  
-/cancelmulti → ড্রাফট ক্যান্সেল
-
-<b>One-tap Copy:</b>
-/code বা /copy ব্যবহার করলে টেক্সট <code>মোনোস্পেস</code> স্টাইলে যাবে।  
-Telegram এই স্টাইলে ট্যাপ করলেই এক ট্যাপে কপি হয়।
-
-<b>Inline Link:</b>
-/link → তারপর টেক্সট হিসেবে পাঠান:
-<code>আমার সাইট | https://example.com</code>
-
-<b>Bullet list:</b>
-/bullets → তারপর টেক্সট:
-<code>লাইন ১
-লাইন ২
-লাইন ৩</code>
-
-<b>Raw HTML:</b>
-/post &lt;b&gt;Bold HTML&lt;/b&gt;
-
-<b>Repost:</b>
-কোনো মেসেজে reply করে /send লিখুন → সেটা চ্যানেলে কপি হবে।
-
-<b>Commands:</b>
-<pre>${escapeHtml(commandListText)}</pre>`;
-
-  bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
-});
-
-bot.onText(/^\/help$/, (msg) => {
-  if (!isOwner(msg)) return;
-  bot.sendMessage(msg.chat.id, 'পুরো গাইড দেখতে /start লিখুন।', {
-    reply_to_message_id: msg.message_id,
-  });
-});
-
-// ---------- Multi-mode control ----------
-bot.onText(/^\/multi$/, (msg) => {
-  if (!isOwner(msg)) return;
-  const uid = msg.from.id;
-  clearDraft(uid);
-  getDraft(uid); // init
-  clearStyleSession(uid);
-  bot.sendMessage(
-    msg.chat.id,
-    '🧱 Multi-style পোস্ট মোড শুরু হয়েছে।\n\nএখন 4-dot থেকে স্টাইল বেছে টেক্সট পাঠান (প্রতিটি টেক্সট একেকটি ব্লক হিসেবে সেভ হবে)।\nশেষ হলে /publish লিখুন, ড্রাফট বাতিল করতে /cancelmulti লিখুন।',
-    { reply_to_message_id: msg.message_id },
-  );
-});
-
-bot.onText(/^\/cancelmulti$/, (msg) => {
-  if (!isOwner(msg)) return;
-  const uid = msg.from.id;
-  clearDraft(uid);
-  clearStyleSession(uid);
-  bot.sendMessage(msg.chat.id, '❌ Multi-style ড্রাফট বাতিল করা হয়েছে।', {
-    reply_to_message_id: msg.message_id,
-  });
-});
-
-bot.onText(/^\/publish$/, (msg) => {
-  if (!isOwner(msg)) return;
-  const uid = msg.from.id;
-  const draft = draftPosts[uid];
-  if (!draft || !draft.blocks || draft.blocks.length === 0) {
-    return bot.sendMessage(
-      msg.chat.id,
-      'ড্রাফটে কোনো ব্লক নেই। /multi দিয়ে শুরু করুন, তারপর স্টাইল+টেক্সট যোগ করুন।',
-      { reply_to_message_id: msg.message_id },
-    );
-  }
-  const html = draft.blocks.join('\n\n');
-  const buttons = draft.buttons || [];
-  const replyMarkup = buttons.length
-    ? { inline_keyboard: buttons.map(b => [{ text: b.text, url: b.url }]) }
-    : undefined;
-
-  bot.sendMessage(CHANNEL_ID, html, {
-    parse_mode: 'HTML',
-    disable_web_page_preview: false,
-    reply_markup: replyMarkup,
-  })
-    .then(() => {
-      bot.sendMessage(msg.chat.id, '✅ Multi-style পোস্ট চ্যানেলে পাঠানো হয়েছে।', {
-        reply_to_message_id: msg.message_id,
-      });
-      clearDraft(uid);
-      clearStyleSession(uid);
-    })
-    .catch((err) => {
-      console.error('publish error', err);
-      bot.sendMessage(msg.chat.id, '❌ পোস্ট দিতে সমস্যা হয়েছে (bot admin / CHANNEL_ID চেক করুন)।', {
-        reply_to_message_id: msg.message_id,
-      });
-    });
-});
-
-// ---------- Style commands ----------
-const styleCommands = [
-  'normal', 'bold', 'italic', 'underline', 'strike',
-  'spoiler', 'code', 'copy', 'pre', 'quote',
-  'link', 'heading', 'bullets', 'note', 'warning',
-  'success', 'info',
+const STYLES = [
+  { id: 'normal', text: 'Normal 🔤' }, { id: 'bold', text: '𝗕𝗼𝗹𝗱' },
+  { id: 'italic', text: '𝙄𝙩𝙖𝙡𝙞𝙘' }, { id: 'underline', text: 'U̲n̲d̲e̲r̲l̲i̲n̲e̲' },
+  { id: 'strike', text: 'S̶t̶r̶i̶k̶e̶' }, { id: 'spoiler', text: 'Spoiler 🌫️' },
+  { id: 'code', text: '𝙲𝚘𝚍𝚎 (Copy)' }, { id: 'pre', text: 'Block 💻' },
+  { id: 'quote', text: '❝ Quote' }, { id: 'heading', text: 'Heading 🔹' },
+  { id: 'bullets', text: '• Bullets' }, { id: 'link', text: '🔗 Link' },
+  { id: 'note', text: '📌 Note' }, { id: 'warning', text: '⚠️ Warn' },
+  { id: 'success', text: '✅ Success' }, { id: 'info', text: 'ℹ️ Info' }
 ];
 
-function handleStyleCommand(mode, msg) {
-  if (!isOwner(msg)) return bot.sendMessage(msg.chat.id, 'Owner only.');
-
-  const uid = msg.from.id;
-  const draft = draftPosts[uid];
-  const isMulti = !!(draft && draft.blocks);
-
-  setStyleSession(uid, mode, isMulti);
-
-  let hint = 'এখন টেক্সট পাঠান।';
-  if (mode === 'link') {
-    hint = 'ফরম্যাট: শিরোনাম | https://example.com';
-  } else if (mode === 'bullets') {
-    hint = 'প্রতিটি পয়েন্ট আলাদা লাইনে লিখুন।';
-  } else if (mode === 'code' || mode === 'copy') {
-    hint = 'এই স্টাইলের টেক্সটে ট্যাপ করলেই এক ট্যাপে কপি হবে।';
+function getStyleMenu(session) {
+  const keyboard = [];
+  // Arrange styles in rows of 2
+  for (let i = 0; i < STYLES.length; i += 2) {
+    keyboard.push([
+      { text: STYLES[i].text, callback_data: `style_${STYLES[i].id}` },
+      ...(STYLES[i+1] ? [{ text: STYLES[i+1].text, callback_data: `style_${STYLES[i+1].id}` }] : [])
+    ]);
   }
-
-  const modeText = isMulti
-    ? `"${mode}" ব্লক সিলেক্ট হয়েছে (Multi-mode)।`
-    : `"${mode}" স্টাইল সিলেক্ট হয়েছে (Quick-mode)।`;
-
-  bot.sendMessage(
-    msg.chat.id,
-    `✅ ${modeText}\n${hint}`,
-    { reply_to_message_id: msg.message_id },
-  );
+  
+  if (session.mode === 'multi') {
+    keyboard.push([{ text: `🚀 Publish Draft (${session.draftBlocks.length} Blocks)`, callback_data: 'action_publish' }]);
+  }
+  keyboard.push([{ text: '🔙 Back to Main Menu', callback_data: 'action_reset' }]);
+  
+  return { inline_keyboard: keyboard };
 }
 
-for (const cmd of styleCommands) {
-  bot.onText(new RegExp(`^\\/${cmd}$`), (msg) => handleStyleCommand(cmd, msg));
-}
-
-// ---------- /post (raw HTML) ----------
-bot.onText(/^\/post\s+([\s\S]+)/, (msg, match) => {
-  if (!isOwner(msg)) return bot.sendMessage(msg.chat.id, 'Owner only.');
-  const raw = match[1].trim();
-  const { textOnly, buttons } = parseButtonsBlock(raw);
-  const replyMarkup = buttons.length
-    ? { inline_keyboard: buttons.map(b => [{ text: b.text, url: b.url }]) }
-    : undefined;
-
-  bot.sendMessage(CHANNEL_ID, textOnly, {
-    parse_mode: 'HTML',
-    disable_web_page_preview: false,
-    reply_markup: replyMarkup,
-  })
-    .then(() => bot.sendMessage(msg.chat.id, '✅ HTML পোস্ট করা হয়েছে।', {
-      reply_to_message_id: msg.message_id,
-    }))
-    .catch((err) => {
-      console.error('post error', err);
-      bot.sendMessage(msg.chat.id, '❌ পোস্ট পাঠাতে সমস্যা হয়েছে।', {
-        reply_to_message_id: msg.message_id,
-      });
-    });
-});
-
-// ---------- /post_spoiler ----------
-bot.onText(/^\/post_spoiler\s+([\s\S]+)/, (msg, match) => {
-  if (!isOwner(msg)) return bot.sendMessage(msg.chat.id, 'Owner only.');
-  const plain = match[1].trim();
-  const html = `<tg-spoiler>${escapeHtml(plain)}</tg-spoiler>`;
-  bot.sendMessage(CHANNEL_ID, html, { parse_mode: 'HTML' })
-    .then(() => bot.sendMessage(msg.chat.id, '😶‍🌫️ spoiler পোস্ট করা হয়েছে।', {
-      reply_to_message_id: msg.message_id,
-    }))
-    .catch((err) => {
-      console.error('post_spoiler error', err);
-      bot.sendMessage(msg.chat.id, '❌ spoiler পাঠাতে সমস্যা হয়েছে।', {
-        reply_to_message_id: msg.message_id,
-      });
-    });
-});
-
-// ---------- /send (copy replied message) ----------
-bot.onText(/^\/send$/, (msg) => {
-  if (!isOwner(msg)) return;
-  if (!msg.reply_to_message) {
-    return bot.sendMessage(
-      msg.chat.id,
-      'যে মেসেজ চ্যানেলে পাঠাতে চান, সেটিতে reply করে তারপর /send লিখুন।',
-      { reply_to_message_id: msg.message_id },
-    );
-  }
-
-  const src = msg.reply_to_message;
-  bot.copyMessage(CHANNEL_ID, msg.chat.id, src.message_id)
-    .then(() => bot.sendMessage(msg.chat.id, '✅ মেসেজ চ্যানেলে কপি করা হয়েছে।', {
-      reply_to_message_id: msg.message_id,
-    }))
-    .catch((err) => {
-      console.error('copyMessage error', err);
-      bot.sendMessage(
-        msg.chat.id,
-        '❌ কপি করতে সমস্যা হয়েছে (bot admin / CHANNEL_ID চেক করুন)।',
-        { reply_to_message_id: msg.message_id },
-      );
-    });
-});
-
-// ---------- General message handler ----------
-bot.on('message', (msg) => {
-  if (!isOwner(msg)) return;
-
-  // commands already handled
-  if (msg.text && msg.text.startsWith('/')) return;
-
+// ---------- /start Command ----------
+bot.onText(/^\/start$/, async (msg) => {
   const uid = msg.from.id;
-  const state = getStyleSession(uid);
+  const chatId = msg.chat.id;
+  if (!isOwner(uid)) return bot.sendMessage(chatId, '⛔ Owner only.');
 
-  if (!state || !state.awaitingText) {
-    return bot.sendMessage(
-      msg.chat.id,
-      'ℹ️ Quick পোস্টের জন্য: 4-dot থেকে স্টাইল সিলেক্ট করে তারপর টেক্সট পাঠান।\nMulti পোস্টের জন্য: আগে /multi, তারপর স্টাইল+টেক্সট, শেষে /publish।',
-      { reply_to_message_id: msg.message_id },
-    );
+  await cleanPreviousMenu(chatId, uid);
+  resetSession(uid);
+  
+  const text = `👑 <b>Channel Manager Bot</b>\n\nকোন মোডে কাজ করতে চান নির্বাচন করুন:`;
+  const sent = await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: MAIN_MENU });
+  getSession(uid).lastMenuMsgId = sent.message_id;
+});
+
+// ---------- Callback Queries (Button Clicks) ----------
+bot.on('callback_query', async (query) => {
+  const uid = query.from.id;
+  const chatId = query.message.chat.id;
+  if (!isOwner(uid)) return bot.answerCallbackQuery(query.id, { text: '⛔ Not allowed.' });
+
+  const data = query.data;
+  const session = getSession(uid);
+
+  // Helper to update menu text
+  const updateMenu = async (text, markup) => {
+    try {
+      await bot.editMessageText(text, { chat_id: chatId, message_id: session.lastMenuMsgId, parse_mode: 'HTML', reply_markup: markup });
+    } catch (e) {
+      await cleanPreviousMenu(chatId, uid);
+      const sent = await bot.sendMessage(chatId, text, { parse_mode: 'HTML', reply_markup: markup });
+      session.lastMenuMsgId = sent.message_id;
+    }
+  };
+
+  if (data === 'action_reset') {
+    resetSession(uid);
+    await updateMenu(`👑 <b>Channel Manager Bot</b>\n\nমেনু থেকে নির্বাচন করুন:`, MAIN_MENU);
+    bot.answerCallbackQuery(query.id);
+  } 
+  
+  else if (data === 'mode_quick') {
+    session.mode = 'quick';
+    session.state = 'IDLE';
+    await updateMenu(`⚡ <b>Quick Mode</b>\nযেকোনো স্টাইল বাটনে ক্লিক করুন:`, getStyleMenu(session));
+    bot.answerCallbackQuery(query.id);
+  } 
+  
+  else if (data === 'mode_multi') {
+    session.mode = 'multi';
+    session.state = 'IDLE';
+    await updateMenu(`🧱 <b>Multi Mode</b>\nস্টাইল সিলেক্ট করে ব্লক তৈরি করুন:`, getStyleMenu(session));
+    bot.answerCallbackQuery(query.id);
   }
 
-  const { mode, isMulti } = state;
+  else if (data.startsWith('style_')) {
+    const style = data.replace('style_', '');
+    session.selectedStyle = style;
+    session.state = 'AWAITING_TEXT';
+    
+    let hint = 'এখন টেক্সট পাঠান। (মেনুতে ফিরতে Back চাপুন)';
+    if (style === 'link') hint = 'ফরম্যাট: <code>শিরোনাম | https://example.com</code>';
+    else if (style === 'bullets') hint = 'প্রতিটি পয়েন্ট আলাদা লাইনে লিখুন।';
+    else if (style === 'code') hint = 'এই টেক্সটে ট্যাপ করলেই কপি হবে।';
+
+    const modeText = session.mode === 'multi' ? 'Multi Mode Block' : 'Quick Post';
+    await updateMenu(`✏️ <b>${modeText}</b>\nস্টাইল: <b>${style}</b>\n\n${hint}`, {
+      inline_keyboard: [[{ text: '🔙 Cancel & Back', callback_data: session.mode === 'multi' ? 'mode_multi' : 'mode_quick' }]]
+    });
+    bot.answerCallbackQuery(query.id);
+  }
+
+  else if (data === 'action_publish') {
+    if (session.draftBlocks.length === 0) {
+      return bot.answerCallbackQuery(query.id, { text: '⚠️ ড্রাফটে কোনো ব্লক নেই!', show_alert: true });
+    }
+    const html = session.draftBlocks.join('\n\n');
+    const replyMarkup = session.draftButtons.length ? { inline_keyboard: session.draftButtons.map(b => [{ text: b.text, url: b.url }]) } : undefined;
+
+    try {
+      await bot.sendMessage(CHANNEL_ID, html, { parse_mode: 'HTML', reply_markup: replyMarkup });
+      resetSession(uid);
+      await updateMenu(`✅ <b>Multi-style পোস্ট চ্যানেলে পাঠানো হয়েছে!</b>`, MAIN_MENU);
+    } catch (err) {
+      bot.answerCallbackQuery(query.id, { text: '❌ পোস্ট ফেইল হয়েছে!', show_alert: true });
+    }
+  }
+
+  else if (data === 'tool_raw') {
+    session.state = 'AWAITING_RAW';
+    await updateMenu(`📝 <b>Raw HTML Mode</b>\nআপনার Raw HTML কোডটি মেসেজ হিসেবে পাঠান।`, {
+      inline_keyboard: [[{ text: '🔙 Cancel', callback_data: 'action_reset' }]]
+    });
+    bot.answerCallbackQuery(query.id);
+  }
+
+  else if (data === 'tool_spoiler') {
+    session.state = 'AWAITING_SPOILER';
+    await updateMenu(`😶‍🌫️ <b>Raw Spoiler Mode</b>\nআপনার টেক্সট পাঠান, এটি সরাসরি স্পয়লার হিসেবে যাবে।`, {
+      inline_keyboard: [[{ text: '🔙 Cancel', callback_data: 'action_reset' }]]
+    });
+    bot.answerCallbackQuery(query.id);
+  }
+
+  else if (data === 'tool_repost') {
+    session.state = 'AWAITING_REPOST';
+    await updateMenu(`🔄 <b>Repost Mode</b>\nযে মেসেজটি চ্যানেলে দিতে চান, সেটি আমাকে ফরওয়ার্ড করুন বা সেন্ড করুন।`, {
+      inline_keyboard: [[{ text: '🔙 Cancel', callback_data: 'action_reset' }]]
+    });
+    bot.answerCallbackQuery(query.id);
+  }
+});
+
+// ---------- Handle Text / Media Inputs ----------
+bot.on('message', async (msg) => {
+  const uid = msg.from.id;
+  const chatId = msg.chat.id;
+  if (!isOwner(uid)) return;
+  if (msg.text && msg.text.startsWith('/')) return; // Ignore /start
+
+  const session = getSession(uid);
+  
+  // Clean user's command message conceptually (Bots can't delete user PMs, so we refresh bot's menu below)
+  await cleanPreviousMenu(chatId, uid);
+
+  // 1. REPOST MODE
+  if (session.state === 'AWAITING_REPOST') {
+    try {
+      await bot.copyMessage(CHANNEL_ID, chatId, msg.message_id);
+      resetSession(uid);
+      const sent = await bot.sendMessage(chatId, `✅ <b>মেসেজ চ্যানেলে কপি করা হয়েছে!</b>`, { parse_mode: 'HTML', reply_markup: MAIN_MENU });
+      session.lastMenuMsgId = sent.message_id;
+    } catch (err) {
+      const sent = await bot.sendMessage(chatId, `❌ <b>কপি করতে সমস্যা হয়েছে।</b>`, { parse_mode: 'HTML', reply_markup: MAIN_MENU });
+      session.lastMenuMsgId = sent.message_id;
+    }
+    return;
+  }
+
+  // Text is required for the rest
   const fullText = msg.text || '';
+  if (!fullText) {
+    const sent = await bot.sendMessage(chatId, '⚠️ অনুগ্রহ করে টেক্সট পাঠান।', { reply_markup: MAIN_MENU });
+    session.lastMenuMsgId = sent.message_id;
+    return;
+  }
+
   const { textOnly, buttons } = parseButtonsBlock(fullText);
   const plainText = textOnly.trim();
-  if (!plainText) {
-    return bot.sendMessage(msg.chat.id, 'ফাঁকা টেক্সট পাঠানো যাবে না।', {
-      reply_to_message_id: msg.message_id,
-    });
+
+  // 2. RAW HTML MODE
+  if (session.state === 'AWAITING_RAW') {
+    const rm = buttons.length ? { inline_keyboard: buttons.map(b => [{ text: b.text, url: b.url }]) } : undefined;
+    try {
+      await bot.sendMessage(CHANNEL_ID, plainText, { parse_mode: 'HTML', reply_markup: rm });
+      resetSession(uid);
+      const sent = await bot.sendMessage(chatId, `✅ <b>HTML পোস্ট সম্পন্ন!</b>`, { parse_mode: 'HTML', reply_markup: MAIN_MENU });
+      session.lastMenuMsgId = sent.message_id;
+    } catch (e) {
+      const sent = await bot.sendMessage(chatId, `❌ <b>HTML ফেইল হয়েছে। ট্যাগ চেক করুন।</b>`, { parse_mode: 'HTML', reply_markup: MAIN_MENU });
+      session.lastMenuMsgId = sent.message_id;
+    }
+    return;
   }
 
-  if (isMulti) {
-    // -------- Multi-mode: block সংগ্রহ --------
-    const draft = getDraft(uid);
-
-    // BUTTONS ব্লক থাকলে শেষের সেটটা পুরো ড্রাফটের buttons হিসেবে সেভ
-    if (buttons.length) {
-      draft.buttons = buttons;
+  // 3. RAW SPOILER MODE
+  if (session.state === 'AWAITING_SPOILER') {
+    try {
+      await bot.sendMessage(CHANNEL_ID, `<tg-spoiler>${escapeHtml(plainText)}</tg-spoiler>`, { parse_mode: 'HTML' });
+      resetSession(uid);
+      const sent = await bot.sendMessage(chatId, `✅ <b>Spoiler পোস্ট সম্পন্ন!</b>`, { parse_mode: 'HTML', reply_markup: MAIN_MENU });
+      session.lastMenuMsgId = sent.message_id;
+    } catch (e) {
+      const sent = await bot.sendMessage(chatId, `❌ <b>ফেইল হয়েছে।</b>`, { parse_mode: 'HTML', reply_markup: MAIN_MENU });
+      session.lastMenuMsgId = sent.message_id;
     }
+    return;
+  }
 
+  // 4. STYLE MODES (Quick / Multi)
+  if (session.state === 'AWAITING_TEXT') {
     let htmlBlock;
-    if (mode === 'link') {
+    if (session.selectedStyle === 'link') {
       const parts = plainText.split('|').map(p => p.trim());
       if (!parts[0] || !parts[1]) {
-        return bot.sendMessage(
-          msg.chat.id,
-          'Link mode ফরম্যাট: Title | https://example.com',
-          { reply_to_message_id: msg.message_id },
-        );
+        const sent = await bot.sendMessage(chatId, '⚠️ Link ফরম্যাট ভুল। Title | URL দিন।', { reply_markup: getStyleMenu(session) });
+        session.lastMenuMsgId = sent.message_id;
+        return;
       }
       let url = parts[1];
       if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
       htmlBlock = `<a href="${escapeHtml(url)}">${escapeHtml(parts[0])}</a>`;
     } else {
-      htmlBlock = buildStyledHtml(mode, plainText);
+      htmlBlock = buildStyledHtml(session.selectedStyle, plainText);
     }
 
-    draft.blocks.push(htmlBlock);
-    const blockNum = draft.blocks.length;
-
-    bot.sendMessage(
-      msg.chat.id,
-      `🧱 Block #${blockNum} যোগ হয়েছে (${mode}).\nআরও স্টাইল বেছে ব্লক করতে পারেন, নাহলে /publish লিখুন।`,
-      { reply_to_message_id: msg.message_id },
-    );
-
-    clearStyleSession(uid);
+    if (session.mode === 'multi') {
+      session.draftBlocks.push(htmlBlock);
+      if (buttons.length) session.draftButtons = buttons; // Keep latest buttons
+      session.state = 'IDLE';
+      
+      const sent = await bot.sendMessage(chatId, `🧱 <b>Block #${session.draftBlocks.length} যোগ হয়েছে!</b>\nআরও স্টাইল সিলেক্ট করুন বা Publish করুন।`, { parse_mode: 'HTML', reply_markup: getStyleMenu(session) });
+      session.lastMenuMsgId = sent.message_id;
+    } 
+    
+    else if (session.mode === 'quick') {
+      const rm = buttons.length ? { inline_keyboard: buttons.map(b => [{ text: b.text, url: b.url }]) } : undefined;
+      try {
+        await bot.sendMessage(CHANNEL_ID, htmlBlock, { parse_mode: 'HTML', reply_markup: rm });
+        resetSession(uid);
+        const sent = await bot.sendMessage(chatId, `✅ <b>চ্যানেলে পোস্ট হয়েছে!</b>`, { parse_mode: 'HTML', reply_markup: MAIN_MENU });
+        session.lastMenuMsgId = sent.message_id;
+      } catch (e) {
+        const sent = await bot.sendMessage(chatId, `❌ <b>পোস্ট ফেইল হয়েছে।</b>`, { parse_mode: 'HTML', reply_markup: MAIN_MENU });
+        session.lastMenuMsgId = sent.message_id;
+      }
+    }
     return;
   }
 
-  // -------- Quick-mode: সঙ্গে সঙ্গে পোস্ট --------
-  let html;
-  if (mode === 'link') {
-    const parts = plainText.split('|').map(p => p.trim());
-    if (!parts[0] || !parts[1]) {
-      return bot.sendMessage(
-        msg.chat.id,
-        'Link mode ফরম্যাট: Title | https://example.com',
-        { reply_to_message_id: msg.message_id },
-      );
-    }
-    let url = parts[1];
-    if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-    html = `<a href="${escapeHtml(url)}">${escapeHtml(parts[0])}</a>`;
-  } else {
-    html = buildStyledHtml(mode, plainText);
-  }
-
-  const replyMarkup = buttons.length
-    ? { inline_keyboard: buttons.map(b => [{ text: b.text, url: b.url }]) }
-    : undefined;
-
-  bot.sendMessage(CHANNEL_ID, html, {
-    parse_mode: 'HTML',
-    disable_web_page_preview: false,
-    reply_markup: replyMarkup,
-  })
-    .then(() => {
-      bot.sendMessage(msg.chat.id, '✅ চ্যানেলে পোস্ট হয়ে গেছে।', {
-        reply_to_message_id: msg.message_id,
-      });
-      clearStyleSession(uid);
-    })
-    .catch((err) => {
-      console.error('quick-mode send error', err);
-      bot.sendMessage(
-        msg.chat.id,
-        '❌ পোস্ট দিতে সমস্যা হয়েছে (bot admin / CHANNEL_ID চেক করুন)।',
-        { reply_to_message_id: msg.message_id },
-      );
-    });
+  // If IDLE, just show main menu
+  const sent = await bot.sendMessage(chatId, `👑 <b>Channel Manager Bot</b>\n\nকী করতে চান নির্বাচন করুন:`, { parse_mode: 'HTML', reply_markup: MAIN_MENU });
+  session.lastMenuMsgId = sent.message_id;
 });

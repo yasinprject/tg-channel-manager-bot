@@ -10,7 +10,6 @@ const CHANNEL_ID = process.env.CHANNEL_ID;
 const PORT = Number(process.env.PORT || 3000);
 const GHOST_MODE = String(process.env.GHOST_MODE ?? 'true').toLowerCase() === 'true';
 
-// Allow multiple owners: OWNER_IDS=1,2,3 OR fallback OWNER_ID
 const OWNER_IDS = (process.env.OWNER_IDS || process.env.OWNER_ID || '')
   .split(',')
   .map(s => s.trim())
@@ -29,21 +28,59 @@ function isOwner(uid) {
 
 // ---------------- EXPRESS (Health) ----------------
 const app = express();
-app.get('/', (req, res) => res.send('Channel Manager Pro Bot is Online.'));
-app.listen(PORT, () => console.log(`Health server running on :${PORT}`));
+app.use(express.json());
+
+app.get('/', (req, res) => {
+  res.status(200).send('Channel Manager Pro Bot is Online.');
+});
+
+const server = app.listen(PORT, () => {
+  console.log(`Health server running on :${PORT}`);
+});
+
+server.on('error', (err) => {
+  console.error('Express server error:', err?.message || err);
+  process.exit(1);
+});
 
 // ---------------- BOT ----------------
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+const bot = new TelegramBot(BOT_TOKEN, {
+  polling: {
+    autoStart: false,
+    interval: 300,
+    params: {
+      timeout: 10,
+    },
+  },
+});
 
-bot.on('polling_error', (err) => console.error('Polling error:', err?.message || err));
-process.on('unhandledRejection', (e) => console.error('UnhandledRejection:', e));
-process.on('uncaughtException', (e) => console.error('UncaughtException:', e));
+bot.on('polling_error', (err) => {
+  console.error('Polling error:', err?.message || err);
+});
 
-bot.setMyCommands([
-  { command: 'start', description: 'Open Main Menu / Restart' },
-  { command: 'menu', description: 'Open Main Menu' },
-  { command: 'cancel', description: 'Cancel current operation' },
-]);
+bot.on('webhook_error', (err) => {
+  console.error('Webhook error:', err?.message || err);
+});
+
+process.on('unhandledRejection', (e) => {
+  console.error('UnhandledRejection:', e);
+});
+
+process.on('uncaughtException', (e) => {
+  console.error('UncaughtException:', e);
+});
+
+process.on('SIGINT', async () => {
+  console.log('SIGINT received. Stopping bot...');
+  try { await bot.stopPolling(); } catch (_) {}
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received. Stopping bot...');
+  try { await bot.stopPolling(); } catch (_) {}
+  process.exit(0);
+});
 
 // ---------------- SESSION ----------------
 const STATES = Object.freeze({
@@ -64,24 +101,19 @@ function defaultSession() {
     chatId: null,
 
     state: STATES.IDLE,
-    mode: null, // quick, multi, media, raw, spoiler, repost
+    mode: null,
     selectedStyle: 'normal',
 
-    postType: 'text', // text, photo, video, document, audio, voice, animation, sticker, video_note, album
+    postType: 'text',
     mediaId: null,
 
-    // Album buffer (photo/video only)
     album: { id: null, items: [], timer: null },
-    mediaAlbumItems: null, // finalized array for sendMediaGroup
+    mediaAlbumItems: null,
 
-    // multi-block draft
     draftBlocks: [],
     draftButtons: [],
 
-    // confirmation payload
-    pending: null, // { kind:'text'|'media'|'album', html, buttons, postType, mediaId, items, rawHtml, previewHtmlMode }
-
-    // UI
+    pending: null,
     lastMenuMsgId: null,
   };
 }
@@ -119,13 +151,16 @@ function escapeHtml(text) {
 }
 
 async function safeDelete(chatId, msgId) {
-  try { await bot.deleteMessage(chatId, msgId); } catch (_) {}
+  try {
+    await bot.deleteMessage(chatId, msgId);
+  } catch (_) {}
 }
 
 function normalizeUrl(url) {
   let u = String(url || '').trim();
   if (!u) return null;
   if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+
   try {
     const parsed = new URL(u);
     if (!['http:', 'https:'].includes(parsed.protocol)) return null;
@@ -135,12 +170,6 @@ function normalizeUrl(url) {
   }
 }
 
-/**
- * BUTTONS parsing rule (safe):
- * - Must contain a line exactly: BUTTONS:
- * - After that: each line -> a row, "||" splits buttons in row
- * - Button format: Text | URL
- */
 function parseButtonsBlock(inputText) {
   const raw = String(inputText || '');
   const lines = raw.split('\n');
@@ -159,9 +188,11 @@ function parseButtonsBlock(inputText) {
     for (const btn of rowButtons) {
       const parts = btn.split('|').map(p => p.trim());
       if (parts.length < 2) continue;
+
       const label = parts[0];
       const url = normalizeUrl(parts[1]);
       if (!label || !url) continue;
+
       row.push({ text: label.slice(0, 64), url });
     }
 
@@ -188,7 +219,7 @@ function buildStyledHtml(style, plainText) {
     case 'code':         return `<code>${safe}</code>`;
     case 'pre':          return `<pre>${safe}</pre>`;
     case 'quote':        return `<blockquote>${safe}</blockquote>`;
-    case 'expand_quote': return `<blockquote expandable>${safe}</blockquote>`;
+    case 'expand_quote': return `<blockquote>${safe}</blockquote>`; // safe fallback
     case 'heading':      return `🔹 <b>${safe}</b>\n──────────────`;
     case 'bullets':      return lines.map(l => `• ${escapeHtml(l)}`).join('\n');
     case 'numbered':     return lines.map((l, i) => `<b>${i + 1}.</b> ${escapeHtml(l)}`).join('\n');
@@ -272,7 +303,7 @@ function getStyleMenu(session) {
   return { inline_keyboard: keyboard };
 }
 
-// ---------------- UI UPDATER ----------------
+// ---------------- UI ----------------
 async function updateUI(chatId, uid, text, markup) {
   const session = getSession(uid);
 
@@ -305,6 +336,7 @@ async function updateUI(chatId, uid, text, markup) {
 // ---------------- PUBLISH HELPERS ----------------
 async function sendLongTextToChannel(html, replyMarkup) {
   const MAX = 4096;
+
   if (html.length <= MAX) {
     return bot.sendMessage(CHANNEL_ID, html, {
       parse_mode: 'HTML',
@@ -314,11 +346,14 @@ async function sendLongTextToChannel(html, replyMarkup) {
   }
 
   const parts = html.split(/\n{2,}/g).filter(Boolean);
-  if (parts.length <= 1) throw new Error('Message too long to send safely.');
+  if (parts.length <= 1) {
+    throw new Error('Message too long to send safely. Add spacing between blocks or shorten text.');
+  }
 
   for (let i = 0; i < parts.length; i++) {
     const chunk = parts[i];
     if (chunk.length > MAX) throw new Error('A block is too long to send.');
+
     await bot.sendMessage(CHANNEL_ID, chunk, {
       parse_mode: 'HTML',
       ...(i === parts.length - 1 && replyMarkup ? { reply_markup: replyMarkup } : {}),
@@ -328,8 +363,6 @@ async function sendLongTextToChannel(html, replyMarkup) {
 }
 
 function mediaCaptionLimit(postType) {
-  // Most captioned media types have 1024 caption limit
-  // sticker/video_note have no caption
   const noCaption = ['sticker', 'video_note'];
   if (noCaption.includes(postType)) return 0;
   return 1024;
@@ -340,7 +373,6 @@ async function sendSingleMedia(postType, mediaId, htmlCaption, buttons) {
   const hasCaption = Boolean(htmlCaption && htmlCaption.trim());
   const captionTooLong = hasCaption && limit > 0 && htmlCaption.length > limit;
 
-  // If caption too long: send media without caption + then send text (with buttons)
   if (captionTooLong) {
     await sendSingleMedia(postType, mediaId, '', null);
     await sendLongTextToChannel(htmlCaption, buttons);
@@ -372,21 +404,15 @@ async function sendSingleMedia(postType, mediaId, htmlCaption, buttons) {
 }
 
 async function sendAlbum(items, htmlCaption, buttons) {
-  // Telegram limitation: sendMediaGroup DOES NOT support reply_markup
-  // so if buttons exist -> send album, then send separate text message with buttons
   const hasButtons = Boolean(buttons);
   const hasCaption = Boolean(htmlCaption && htmlCaption.trim());
 
   if (hasButtons) {
-    // Send album without caption, then send caption text with buttons
     await bot.sendMediaGroup(CHANNEL_ID, items.map(it => ({ type: it.type, media: it.media })));
-
-    const textToSend = hasCaption ? htmlCaption : '🔗';
-    await sendLongTextToChannel(textToSend, buttons);
+    await sendLongTextToChannel(hasCaption ? htmlCaption : '🔗', buttons);
     return;
   }
 
-  // No buttons: try caption on first item
   const CAPTION_MAX = 1024;
   if (hasCaption && htmlCaption.length > CAPTION_MAX) {
     await bot.sendMediaGroup(CHANNEL_ID, items.map(it => ({ type: it.type, media: it.media })));
@@ -444,7 +470,7 @@ function renderPendingPreview(session) {
   return `🧾 <b>Preview (Raw)</b>\n\n<pre>${escapeHtml(p.rawHtml || '')}</pre>`;
 }
 
-// ---------------- MEDIA EXTRACTORS ----------------
+// ---------------- MEDIA ----------------
 function extractSingleMedia(msg) {
   if (msg.photo) {
     const file_id = msg.photo[msg.photo.length - 1].file_id;
@@ -461,7 +487,6 @@ function extractSingleMedia(msg) {
 }
 
 function extractAlbumItem(msg) {
-  // Telegram albums typically support photo/video
   if (msg.photo) {
     const file_id = msg.photo[msg.photo.length - 1].file_id;
     return { type: 'photo', media: file_id };
@@ -478,12 +503,12 @@ function scheduleFinalizeAlbum(uid) {
   if (!chatId) return;
 
   clearAlbumTimer(session);
+
   session.album.timer = setTimeout(async () => {
     try {
       const items = session.album.items.slice();
       const count = items.length;
 
-      // finalize
       session.mediaAlbumItems = items;
       session.postType = 'album';
       session.mediaId = null;
@@ -500,7 +525,6 @@ function scheduleFinalizeAlbum(uid) {
         getStyleMenu(session)
       );
     } catch (e) {
-      // ignore finalize errors
       console.error('Album finalize error:', e);
     }
   }, 1200);
@@ -550,6 +574,18 @@ bot.onText(/^\/cancel$/i, async (msg) => {
   await updateUI(msg.chat.id, uid, `✅ Cancel করা হয়েছে।`, MAIN_MENU);
 });
 
+bot.onText(/^\/ping$/i, async (msg) => {
+  const uid = msg.from?.id;
+  if (!isOwner(uid)) return;
+  if (msg.chat.type !== 'private') return;
+
+  try {
+    await bot.sendMessage(msg.chat.id, '✅ Bot is alive.');
+  } catch (e) {
+    console.error('Ping error:', e?.message || e);
+  }
+});
+
 // ---------------- CALLBACK QUERIES ----------------
 bot.on('callback_query', async (query) => {
   const uid = query.from?.id;
@@ -575,7 +611,6 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  // Confirm flow
   if (data === 'confirm_publish') {
     try {
       await publishPending(session);
@@ -614,17 +649,16 @@ bot.on('callback_query', async (query) => {
       return;
     }
 
-    // quick/media -> back to style selection
     session.state = STATES.WAIT_STYLE;
     session.pending = null;
     await updateUI(chatId, uid, `🎨 স্টাইল সিলেক্ট করুন:`, getStyleMenu(session));
     return;
   }
 
-  // Mode selection
   if (data.startsWith('mode_')) {
     const selectedMode = data.replace('mode_', '');
     resetSession(uid, true);
+
     const s = getSession(uid);
     s.chatId = chatId;
     s.mode = selectedMode;
@@ -676,7 +710,6 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  // Style selection
   if (data.startsWith('style_')) {
     session.selectedStyle = data.replace('style_', '');
     session.state = STATES.WAIT_TEXT;
@@ -694,7 +727,6 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  // Multi actions
   if (data === 'action_undo_last') {
     if (session.draftBlocks.length > 0) session.draftBlocks.pop();
     if (session.draftBlocks.length === 0) session.draftButtons = [];
@@ -722,7 +754,6 @@ bot.on('callback_query', async (query) => {
     return;
   }
 
-  // Media skip caption (single or album)
   if (data === 'action_skip_caption') {
     if (session.postType === 'album' && session.mediaAlbumItems?.length) {
       session.pending = {
@@ -763,7 +794,7 @@ bot.on('message', async (msg) => {
   if (msg.from?.is_bot) return;
   if (msg.chat.type !== 'private') return;
 
-  if (msg.text && /^\/(start|menu|cancel)/i.test(msg.text)) return;
+  if (msg.text && /^\/(start|menu|cancel|ping)/i.test(msg.text)) return;
 
   const chatId = msg.chat.id;
   const session = getSession(uid);
@@ -774,10 +805,14 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // Repost must copy BEFORE deleting
   if (session.state === STATES.WAIT_REPOST) {
     try {
-      await bot.copyMessage(CHANNEL_ID, chatId, msg.message_id);
+      if (typeof bot.copyMessage === 'function') {
+        await bot.copyMessage(CHANNEL_ID, chatId, msg.message_id);
+      } else {
+        await bot.forwardMessage(CHANNEL_ID, chatId, msg.message_id);
+      }
+
       if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
 
       resetSession(uid, true);
@@ -789,7 +824,6 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // Media/File/Album receiving
   if (session.state === STATES.WAIT_MEDIA) {
     const groupId = msg.media_group_id;
     if (groupId) {
@@ -800,12 +834,12 @@ bot.on('message', async (msg) => {
         return;
       }
 
-      // store item
       if (session.album.id !== groupId) {
         clearAlbumTimer(session);
         session.album.id = groupId;
         session.album.items = [];
       }
+
       session.album.items.push(item);
 
       if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
@@ -827,7 +861,6 @@ bot.on('message', async (msg) => {
 
     if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
 
-    // If media type doesn't support caption -> go confirm directly
     if (['sticker', 'video_note'].includes(session.postType)) {
       session.pending = {
         kind: 'media',
@@ -852,10 +885,8 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // For other modes, keep chat clean
   if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
 
-  // Need text/caption for below
   const rawText = msg.text || msg.caption || '';
   if (!rawText.trim()) {
     await updateUI(chatId, uid, `⚠️ <b>টেক্সট পাওয়া যায়নি</b>\nটেক্সট লিখে পাঠান।`, CANCEL_MENU);
@@ -866,11 +897,10 @@ bot.on('message', async (msg) => {
   const plainText = textOnly.trim();
   const replyMarkup = buttons.length ? { inline_keyboard: buttons } : null;
 
-  // Raw HTML / Spoiler -> Confirm
   if (session.state === STATES.WAIT_RAW || session.state === STATES.WAIT_SPOILER) {
     let finalHtml;
     if (session.state === STATES.WAIT_SPOILER) finalHtml = `<tg-spoiler>${escapeHtml(plainText)}</tg-spoiler>`;
-    else finalHtml = plainText; // raw
+    else finalHtml = plainText;
 
     session.pending = {
       kind: 'text',
@@ -885,7 +915,6 @@ bot.on('message', async (msg) => {
     return;
   }
 
-  // Styled text (quick/multi/media caption)
   if (session.state === STATES.WAIT_TEXT) {
     if (!plainText) {
       await updateUI(chatId, uid, `⚠️ <b>Empty text</b>`, CANCEL_MENU);
@@ -899,18 +928,19 @@ bot.on('message', async (msg) => {
         await updateUI(chatId, uid, `⚠️ <b>Link format ভুল</b>\n<code>Text | https://example.com</code>`, CANCEL_MENU);
         return;
       }
+
       const label = parts[0];
       const url = normalizeUrl(parts[1]);
       if (!url) {
         await updateUI(chatId, uid, `⚠️ <b>Invalid URL</b>`, CANCEL_MENU);
         return;
       }
+
       htmlBlock = `<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>`;
     } else {
       htmlBlock = buildStyledHtml(session.selectedStyle, plainText);
     }
 
-    // Multi
     if (session.mode === 'multi') {
       session.draftBlocks.push(htmlBlock);
       if (buttons.length) session.draftButtons = buttons;
@@ -925,7 +955,6 @@ bot.on('message', async (msg) => {
       return;
     }
 
-    // Quick text -> confirm
     if (session.mode === 'quick' && session.postType === 'text') {
       session.pending = { kind: 'text', html: htmlBlock, buttons: replyMarkup, previewHtmlMode: true };
       session.state = STATES.WAIT_CONFIRM;
@@ -933,7 +962,6 @@ bot.on('message', async (msg) => {
       return;
     }
 
-    // Media caption -> confirm (single or album)
     if (session.mode === 'media') {
       if (session.postType === 'album' && session.mediaAlbumItems?.length) {
         session.pending = {
@@ -970,3 +998,41 @@ bot.on('message', async (msg) => {
     await updateUI(chatId, uid, `⚠️ Unknown flow. Reset করুন।`, MAIN_MENU);
   }
 });
+
+// ---------------- STARTUP ----------------
+async function startBot() {
+  try {
+    console.log('Starting bot...');
+
+    // remove webhook if any
+    try {
+      await bot.deleteWebHook();
+      console.log('Webhook cleared.');
+    } catch (e) {
+      console.error('deleteWebHook failed:', e?.message || e);
+    }
+
+    await bot.startPolling();
+    console.log('Polling started.');
+
+    try {
+      await bot.setMyCommands([
+        { command: 'start', description: 'Open Main Menu / Restart' },
+        { command: 'menu', description: 'Open Main Menu' },
+        { command: 'cancel', description: 'Cancel current operation' },
+        { command: 'ping', description: 'Check bot status' },
+      ]);
+      console.log('Bot commands set.');
+    } catch (e) {
+      console.error('setMyCommands failed:', e?.message || e);
+    }
+
+    const me = await bot.getMe();
+    console.log(`Bot started successfully as @${me.username}`);
+  } catch (e) {
+    console.error('Fatal startup error:', e?.message || e);
+    process.exit(1);
+  }
+}
+
+startBot();

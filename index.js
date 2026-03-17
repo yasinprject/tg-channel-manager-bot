@@ -87,6 +87,7 @@ const STATES = Object.freeze({
   IDLE: 'IDLE',
   WAIT_MEDIA: 'WAIT_MEDIA',
   WAIT_STYLE: 'WAIT_STYLE',
+  WAIT_STYLE_PREVIEW: 'WAIT_STYLE_PREVIEW',
   WAIT_TEXT: 'WAIT_TEXT',
   WAIT_RAW: 'WAIT_RAW',
   WAIT_SPOILER: 'WAIT_SPOILER',
@@ -103,6 +104,7 @@ function defaultSession() {
     state: STATES.IDLE,
     mode: null,
     selectedStyle: 'normal',
+    previewStyle: null,
 
     postType: 'text',
     mediaId: null,
@@ -219,7 +221,7 @@ function buildStyledHtml(style, plainText) {
     case 'code':         return `<code>${safe}</code>`;
     case 'pre':          return `<pre>${safe}</pre>`;
     case 'quote':        return `<blockquote>${safe}</blockquote>`;
-    case 'expand_quote': return `<blockquote>${safe}</blockquote>`; // safe fallback
+    case 'expand_quote': return `<blockquote>${safe}</blockquote>`;
     case 'heading':      return `🔹 <b>${safe}</b>\n──────────────`;
     case 'bullets':      return lines.map(l => `• ${escapeHtml(l)}`).join('\n');
     case 'numbered':     return lines.map((l, i) => `<b>${i + 1}.</b> ${escapeHtml(l)}`).join('\n');
@@ -228,8 +230,47 @@ function buildStyledHtml(style, plainText) {
     case 'note':         return `📌 <b>Note:</b> ${safe}`;
     case 'warning':      return `⚠️ <b>Warning:</b> ${safe}`;
     case 'signature':    return `<i>— ${safe}</i>`;
+    case 'center':       return `──────────────\n<b>${safe}</b>\n──────────────`;
+    case 'divider':      return `━━━━━━━━━━━━━━━━━━`;
+    case 'highlight':    return `✨ <b>${safe}</b> ✨`;
+    case 'mono_quote':   return `<blockquote><code>${safe}</code></blockquote>`;
     default:             return safe;
   }
+}
+
+function buildStylePreview(style) {
+  const demoTextMap = {
+    normal: 'এটি Normal style এর উদাহরণ',
+    title: 'এটি Title style এর উদাহরণ',
+    bold: 'এটি Bold style এর উদাহরণ',
+    italic: 'এটি Italic style এর উদাহরণ',
+    underline: 'এটি Underline style এর উদাহরণ',
+    strike: 'এটি Strike style এর উদাহরণ',
+    heading: 'এটি Heading style এর উদাহরণ',
+    quote: 'এটি Quote style এর উদাহরণ',
+    expand_quote: 'এটি Expand Quote style এর উদাহরণ',
+    spoiler: 'এটি Spoiler style এর উদাহরণ',
+    code: 'console.log("Inline Code Example")',
+    pre: 'function hello() {\n  return "Code Block Example";\n}',
+    bullets: 'প্রথম পয়েন্ট\nদ্বিতীয় পয়েন্ট\nতৃতীয় পয়েন্ট',
+    numbered: 'প্রথম ধাপ\nদ্বিতীয় ধাপ\nতৃতীয় ধাপ',
+    pros: 'সহজ\nদ্রুত\nপরিষ্কার',
+    cons: 'সীমাবদ্ধতা ১\nসীমাবদ্ধতা ২',
+    note: 'এটি একটি গুরুত্বপূর্ণ নোট',
+    warning: 'এখানে সতর্কতা দেখানো হবে',
+    signature: 'Yasin',
+    center: 'Centered Highlight Style',
+    divider: '',
+    highlight: 'এটি Highlight style এর উদাহরণ',
+    mono_quote: 'Monospace quoted example',
+    link: 'Google | https://google.com',
+  };
+
+  if (style === 'link') {
+    return `<a href="https://google.com">Google</a>`;
+  }
+
+  return buildStyledHtml(style, demoTextMap[style] ?? 'Sample Preview');
 }
 
 // ---------------- MENUS ----------------
@@ -237,14 +278,16 @@ const MAIN_MENU = {
   inline_keyboard: [
     [
       { text: '⚡ Quick Text', callback_data: 'mode_quick' },
-      { text: '🧱 Multi-Block', callback_data: 'mode_multi' },
+      { text: '🧱 Multi Block', callback_data: 'mode_multi' },
     ],
-    [{ text: '📎 Media / File / Album', callback_data: 'mode_media' }],
     [
+      { text: '📎 Media / Album', callback_data: 'mode_media' },
       { text: '📝 Raw HTML', callback_data: 'mode_raw' },
-      { text: '😶‍🌫️ Spoiler', callback_data: 'mode_spoiler' },
     ],
-    [{ text: '🔄 Repost / Copy Message', callback_data: 'mode_repost' }],
+    [
+      { text: '😶‍🌫️ Spoiler', callback_data: 'mode_spoiler' },
+      { text: '🔄 Repost', callback_data: 'mode_repost' },
+    ],
     [{ text: '❌ Reset', callback_data: 'reset' }],
   ],
 };
@@ -264,16 +307,30 @@ const CONFIRM_MENU = {
 };
 
 const STYLES = [
-  { id: 'normal', text: 'Normal 🔤' },      { id: 'title', text: '🏆 Title' },
-  { id: 'bold', text: 'Bold' },            { id: 'italic', text: 'Italic' },
-  { id: 'underline', text: 'Underline' },  { id: 'strike', text: 'Strike' },
-  { id: 'heading', text: '🔹 Heading' },   { id: 'quote', text: '❝ Quote' },
-  { id: 'expand_quote', text: '📖 Exp. Quote' }, { id: 'spoiler', text: '🌫️ Spoiler' },
-  { id: 'code', text: 'Code (Inline)' },   { id: 'pre', text: 'Code Block' },
-  { id: 'bullets', text: '• Bullets' },    { id: 'numbered', text: '1️⃣ Numbered' },
-  { id: 'pros', text: '✅ Pros' },         { id: 'cons', text: '❌ Cons' },
-  { id: 'note', text: '📌 Note' },         { id: 'warning', text: '⚠️ Warning' },
-  { id: 'link', text: '🔗 Text Link' },    { id: 'signature', text: '✍️ Signature' },
+  { id: 'normal', text: 'Normal 🔤' },
+  { id: 'title', text: '🏆 Title' },
+  { id: 'bold', text: 'Bold' },
+  { id: 'italic', text: 'Italic' },
+  { id: 'underline', text: 'Underline' },
+  { id: 'strike', text: 'Strike' },
+  { id: 'heading', text: '🔹 Heading' },
+  { id: 'quote', text: '❝ Quote' },
+  { id: 'expand_quote', text: '📖 Exp. Quote' },
+  { id: 'spoiler', text: '🌫️ Spoiler' },
+  { id: 'code', text: 'Code (Inline)' },
+  { id: 'pre', text: 'Code Block' },
+  { id: 'bullets', text: '• Bullets' },
+  { id: 'numbered', text: '1️⃣ Numbered' },
+  { id: 'pros', text: '✅ Pros' },
+  { id: 'cons', text: '❌ Cons' },
+  { id: 'note', text: '📌 Note' },
+  { id: 'warning', text: '⚠️ Warning' },
+  { id: 'link', text: '🔗 Text Link' },
+  { id: 'signature', text: '✍️ Signature' },
+  { id: 'center', text: '🎯 Center' },
+  { id: 'divider', text: '➖ Divider' },
+  { id: 'highlight', text: '✨ Highlight' },
+  { id: 'mono_quote', text: '🧾 Mono Quote' },
 ];
 
 function getStyleMenu(session) {
@@ -294,13 +351,56 @@ function getStyleMenu(session) {
   if (session.mode === 'multi') {
     if (session.draftBlocks.length > 0) {
       keyboard.push([{ text: `↩️ Undo Last (Now: ${session.draftBlocks.length})`, callback_data: 'action_undo_last' }]);
-      keyboard.push([{ text: `🗑️ Clear Draft`, callback_data: 'action_clear_draft' }]);
+      keyboard.push([{ text: '🗑️ Clear Draft', callback_data: 'action_clear_draft' }]);
       keyboard.push([{ text: `🚀 Publish (${session.draftBlocks.length} blocks)`, callback_data: 'action_publish' }]);
     }
   }
 
   keyboard.push([{ text: '🔙 Cancel', callback_data: 'cancel' }]);
   return { inline_keyboard: keyboard };
+}
+
+function getStylePreviewMenu() {
+  return {
+    inline_keyboard: [
+      [{ text: '✅ Use This Style', callback_data: 'action_use_previewed_style' }],
+      [{ text: '🔙 Back to Styles', callback_data: 'action_back_to_styles' }],
+      [{ text: '❌ Cancel', callback_data: 'cancel' }],
+    ],
+  };
+}
+
+function getEditorMenu(styleId) {
+  const rows = [];
+
+  if (styleId !== 'link') {
+    rows.push([{ text: '🔘 Button Guide', callback_data: 'action_show_button_guide' }]);
+  }
+
+  rows.push([{ text: '🔙 Cancel', callback_data: 'cancel' }]);
+  return { inline_keyboard: rows };
+}
+
+function getEditorInstructions(styleId) {
+  const styleName = STYLES.find(s => s.id === styleId)?.text || styleId;
+
+  if (styleId === 'link') {
+    return `✏️ <b>Editor (${escapeHtml(styleName)})</b>\n\nএই style-এর জন্য শুধু এই ফরম্যাটে পাঠান:\n<code>Text | https://example.com</code>`;
+  }
+
+  return `✏️ <b>Editor (${escapeHtml(styleName)})</b>\n\nএখন আপনার টেক্সট লিখে পাঠান।`;
+}
+
+function getButtonGuideText() {
+  return (
+    `🔘 <b>Button Guide</b>\n\n` +
+    `পোস্টের টেক্সটের নিচে বাটন দিতে চাইলে মেসেজের শেষে এইভাবে লিখবেন:\n\n` +
+    `<pre>BUTTONS:\nGoogle | https://google.com\nA | https://a.com || B | https://b.com</pre>\n` +
+    `<b>নিয়ম:</b>\n` +
+    `• <code>BUTTONS:</code> আলাদা লাইনে হবে\n` +
+    `• এক লাইনে ১টা বা একাধিক button দিতে পারবেন\n` +
+    `• <code>||</code> দিলে একই row-তে multiple button হবে`
+  );
 }
 
 // ---------------- UI ----------------
@@ -521,7 +621,7 @@ function scheduleFinalizeAlbum(uid) {
       await updateUI(
         chatId,
         uid,
-        `✅ <b>Album received!</b>\n\nItems: <b>${count}</b>\nএখন caption এর স্টাইল সিলেক্ট করুন, অথবা Skip Caption দিন:`,
+        `✅ <b>Album received!</b>\n\nItems: <b>${count}</b>\nএখন caption style নির্বাচন করুন:`,
         getStyleMenu(session)
       );
     } catch (e) {
@@ -541,7 +641,7 @@ async function openMainMenu(chatId, uid, reset = true) {
   await updateUI(
     chatId,
     uid,
-    `👑 <b>Channel Manager Pro (All-in-One)</b>\n\nমেনু থেকে একটি অপশন নির্বাচন করুন:`,
+    `👑 <b>Channel Manager Pro</b>\n\n<b>Modern Post Builder for Telegram</b>\n\nএকটি মোড নির্বাচন করুন:`,
     MAIN_MENU
   );
 }
@@ -666,14 +766,14 @@ bot.on('callback_query', async (query) => {
     if (selectedMode === 'quick') {
       s.state = STATES.WAIT_STYLE;
       s.postType = 'text';
-      await updateUI(chatId, uid, `⚡ <b>Quick Text</b>\n\nটেক্সটের স্টাইল সিলেক্ট করুন:`, getStyleMenu(s));
+      await updateUI(chatId, uid, `⚡ <b>Quick Text</b>\n\nপোস্টের style নির্বাচন করুন:`, getStyleMenu(s));
       return;
     }
 
     if (selectedMode === 'multi') {
       s.state = STATES.WAIT_STYLE;
       s.postType = 'text';
-      await updateUI(chatId, uid, `🧱 <b>Multi-Block Mode</b>\n\nপ্রথম ব্লকের স্টাইল সিলেক্ট করুন:`, getStyleMenu(s));
+      await updateUI(chatId, uid, `🧱 <b>Multi-Block Mode</b>\n\nপ্রথম ব্লকের style নির্বাচন করুন:`, getStyleMenu(s));
       return;
     }
 
@@ -682,7 +782,7 @@ bot.on('callback_query', async (query) => {
       await updateUI(
         chatId,
         uid,
-        `📎 <b>Media/File/Album Mode</b>\n\nযেকোনো মিডিয়া পাঠান:\n• Photo/Video (single)\n• Photo/Video Album\n• Document (PDF/ZIP)\n• Audio/Voice\n• GIF (Animation)\n• Sticker / Video Note\n\nতারপর caption চাইলে স্টাইল সিলেক্ট করবেন।`,
+        `📎 <b>Media / Album Mode</b>\n\nযেকোনো মিডিয়া পাঠান:\n• Photo/Video (single)\n• Photo/Video Album\n• Document\n• Audio/Voice\n• GIF (Animation)\n• Sticker / Video Note\n\nতারপর caption style নির্বাচন করবেন।`,
         CANCEL_MENU
       );
       return;
@@ -690,7 +790,7 @@ bot.on('callback_query', async (query) => {
 
     if (selectedMode === 'raw') {
       s.state = STATES.WAIT_RAW;
-      await updateUI(chatId, uid, `📝 <b>Raw HTML Mode</b>\n\nHTML পাঠান। Buttons দিতে চাইলে:\n<pre>BUTTONS:\nName | https://url</pre>`, CANCEL_MENU);
+      await updateUI(chatId, uid, `📝 <b>Raw HTML Mode</b>\n\nHTML পাঠান।`, CANCEL_MENU);
       return;
     }
 
@@ -711,19 +811,45 @@ bot.on('callback_query', async (query) => {
   }
 
   if (data.startsWith('style_')) {
-    session.selectedStyle = data.replace('style_', '');
-    session.state = STATES.WAIT_TEXT;
+    session.previewStyle = data.replace('style_', '');
+    session.state = STATES.WAIT_STYLE_PREVIEW;
 
-    const styleName = STYLES.find(s => s.id === session.selectedStyle)?.text || session.selectedStyle;
+    const styleName = STYLES.find(s => s.id === session.previewStyle)?.text || session.previewStyle;
+    const previewHtml = buildStylePreview(session.previewStyle);
 
-    let instructions = `✏️ <b>Editor (${escapeHtml(styleName)})</b>\n\nটেক্সট লিখে পাঠান।`;
-    if (session.selectedStyle === 'link') {
-      instructions += `\n\n<blockquote><b>ফরম্যাট:</b>\n<code>Text | https://example.com</code></blockquote>`;
-    } else {
-      instructions += `\n\n<blockquote><b>Buttons (optional):</b>\n<pre>BUTTONS:\nGoogle | https://google.com\nA | https://a.com || B | https://b.com</pre></blockquote>`;
+    await updateUI(
+      chatId,
+      uid,
+      `👀 <b>Style Preview: ${escapeHtml(styleName)}</b>\n\n${previewHtml}\n\n<i>এই style ব্যবহার করতে চাইলে নিচের বাটনে চাপুন।</i>`,
+      getStylePreviewMenu()
+    );
+    return;
+  }
+
+  if (data === 'action_use_previewed_style') {
+    if (!session.previewStyle) {
+      await updateUI(chatId, uid, `⚠️ কোনো style preview পাওয়া যায়নি।`, getStyleMenu(session));
+      return;
     }
 
-    await updateUI(chatId, uid, instructions, CANCEL_MENU);
+    session.selectedStyle = session.previewStyle;
+    session.previewStyle = null;
+    session.state = STATES.WAIT_TEXT;
+
+    await updateUI(chatId, uid, getEditorInstructions(session.selectedStyle), getEditorMenu(session.selectedStyle));
+    return;
+  }
+
+  if (data === 'action_back_to_styles') {
+    session.previewStyle = null;
+    session.state = STATES.WAIT_STYLE;
+
+    await updateUI(chatId, uid, `🎨 <b>Choose a style</b>\n\nনিচে সব style দেওয়া আছে:`, getStyleMenu(session));
+    return;
+  }
+
+  if (data === 'action_show_button_guide') {
+    await updateUI(chatId, uid, getButtonGuideText(), getEditorMenu(session.selectedStyle));
     return;
   }
 
@@ -879,7 +1005,7 @@ bot.on('message', async (msg) => {
     await updateUI(
       chatId,
       uid,
-      `✅ <b>Media received!</b>\n\nএখন caption এর স্টাইল সিলেক্ট করুন, অথবা Skip Caption দিন:`,
+      `✅ <b>Media received!</b>\n\nএখন caption style নির্বাচন করুন:`,
       getStyleMenu(session)
     );
     return;
@@ -916,8 +1042,8 @@ bot.on('message', async (msg) => {
   }
 
   if (session.state === STATES.WAIT_TEXT) {
-    if (!plainText) {
-      await updateUI(chatId, uid, `⚠️ <b>Empty text</b>`, CANCEL_MENU);
+    if (!plainText && session.selectedStyle !== 'divider') {
+      await updateUI(chatId, uid, `⚠️ <b>Empty text</b>`, getEditorMenu(session.selectedStyle));
       return;
     }
 
@@ -925,14 +1051,14 @@ bot.on('message', async (msg) => {
     if (session.selectedStyle === 'link') {
       const parts = plainText.split('|').map(p => p.trim());
       if (parts.length < 2) {
-        await updateUI(chatId, uid, `⚠️ <b>Link format ভুল</b>\n<code>Text | https://example.com</code>`, CANCEL_MENU);
+        await updateUI(chatId, uid, `⚠️ <b>Link format ভুল</b>\n<code>Text | https://example.com</code>`, getEditorMenu(session.selectedStyle));
         return;
       }
 
       const label = parts[0];
       const url = normalizeUrl(parts[1]);
       if (!url) {
-        await updateUI(chatId, uid, `⚠️ <b>Invalid URL</b>`, CANCEL_MENU);
+        await updateUI(chatId, uid, `⚠️ <b>Invalid URL</b>`, getEditorMenu(session.selectedStyle));
         return;
       }
 
@@ -949,7 +1075,7 @@ bot.on('message', async (msg) => {
       await updateUI(
         chatId,
         uid,
-        `🧱 <b>Block added!</b>\n\nবর্তমানে: <b>${session.draftBlocks.length}</b> blocks.\nপরবর্তী স্টাইল সিলেক্ট করুন অথবা Publish করুন:`,
+        `🧱 <b>Block added!</b>\n\nবর্তমানে: <b>${session.draftBlocks.length}</b> blocks.\nপরবর্তী style নির্বাচন করুন অথবা Publish করুন:`,
         getStyleMenu(session)
       );
       return;
@@ -1004,7 +1130,6 @@ async function startBot() {
   try {
     console.log('Starting bot...');
 
-    // remove webhook if any
     try {
       await bot.deleteWebHook();
       console.log('Webhook cleared.');

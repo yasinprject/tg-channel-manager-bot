@@ -27,7 +27,7 @@ function isOwner(uid) {
 // ---------------- EXPRESS (Health) ----------------
 const app = express();
 app.use(express.json());
-app.get('/', (req, res) => res.status(200).send('Channel Manager Pro is Online with Blank Screen UI.'));
+app.get('/', (req, res) => res.status(200).send('Channel Manager Pro is Online & Smooth.'));
 app.listen(PORT, () => console.log(`✅ Health server running on port :${PORT}`));
 
 // ---------------- BOT INITIALIZATION ----------------
@@ -61,7 +61,7 @@ function getSession(uid) {
       mediaAlbumItems: null,
       draftBlocks: [],
       draftButtons:[],
-      lastBotMsgId: null, // বটের শেষ মেসেজ ট্র্যাক করার জন্য
+      lastBotMsgId: null, 
     };
   }
   return sessions[uid];
@@ -69,14 +69,15 @@ function getSession(uid) {
 
 function resetSession(uid) {
   const chatId = sessions[uid]?.chatId ?? null;
+  const lastMsg = sessions[uid]?.lastBotMsgId ?? null;
   if (sessions[uid]?.album?.timer) clearTimeout(sessions[uid].album.timer);
   
   sessions[uid] = getSession('dummy'); 
-  sessions[uid] = { ...sessions['dummy'], chatId: chatId, lastBotMsgId: null };
+  sessions[uid] = { ...sessions['dummy'], chatId: chatId, lastBotMsgId: lastMsg };
   delete sessions['dummy'];
 }
 
-// ---------------- UTILITIES (BLANK SCREEN LOGIC) ----------------
+// ---------------- UTILITIES (SMOOTH UI LOGIC) ----------------
 function escapeHtml(text) {
   if (!text) return '';
   return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -86,37 +87,41 @@ async function safeDelete(chatId, msgId) {
   try { if (msgId) await bot.deleteMessage(chatId, msgId); } catch (_) {}
 }
 
-// 🌟 ডাইনামিক UI আপডেটার: আগের মেসেজ মুছে নতুন মেসেজ দেবে
+// 🌟 SMART UI UPDATER: এডিট করবে, ডিলিট করে রিফ্রেশ নিবে না!
 async function updateUI(chatId, uid, text, markup) {
   const session = getSession(uid);
   bot.sendChatAction(chatId, 'typing').catch(() => {});
 
-  if (session.lastBotMsgId) {
-    await safeDelete(chatId, session.lastBotMsgId);
-    session.lastBotMsgId = null;
-  }
-
   try {
-    const payload = { parse_mode: 'HTML', disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}) };
-    const sent = await bot.sendMessage(chatId, text, payload);
-    session.lastBotMsgId = sent.message_id;
+    if (session.lastBotMsgId) {
+      // মেসেজ এডিট করার চেষ্টা করবে, এতে স্ক্রিন কাঁপবে না
+      await bot.editMessageText(text, {
+        chat_id: chatId,
+        message_id: session.lastBotMsgId,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: markup
+      });
+    } else {
+      // যদি মেসেজ না থাকে তবে নতুন পাঠাবে
+      const payload = { parse_mode: 'HTML', disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}) };
+      const sent = await bot.sendMessage(chatId, text, payload);
+      session.lastBotMsgId = sent.message_id;
+    }
   } catch (error) {
-    const sent = await bot.sendMessage(chatId, `⚠️ <b>Error:</b> ${error.message}`, { parse_mode: 'HTML' });
-    session.lastBotMsgId = sent.message_id;
+    // যদি লেখা সেম হয়, ইগনোর করবে
+    if (error.response?.body?.description?.includes('exactly the same')) return;
+    
+    // এডিট ফেইল হলে ডিলিট করে নতুন পাঠাবে
+    await safeDelete(chatId, session.lastBotMsgId);
+    try {
+      const payload = { parse_mode: 'HTML', disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}) };
+      const sent = await bot.sendMessage(chatId, text, payload);
+      session.lastBotMsgId = sent.message_id;
+    } catch (err) {}
   }
 }
 
-// পাবলিশ করার সময় এনিমেশন
-async function playPublishAnimation(chatId, uid) {
-  const session = getSession(uid);
-  if (session.lastBotMsgId) await safeDelete(chatId, session.lastBotMsgId);
-  try {
-    const msg = await bot.sendMessage(chatId, `⏳ <b>Publishing...</b>`, { parse_mode: 'HTML' });
-    return msg.message_id;
-  } catch (e) { return null; }
-}
-
-// লিংক ও বাটন এক্সট্রাক্টর
 function normalizeUrl(url) {
   let u = String(url || '').trim();
   if (!u) return null;
@@ -157,12 +162,10 @@ const STYLES_LIST =[
 function buildStyledHtml(style, text) {
   const safe = escapeHtml(text || '');
   const lines = (text || '').split('\n').map(l => l.trim()).filter(Boolean);
-
   if (style === 'link') {
     const parts = (text || '').split('|').map(p => p.trim());
     return (parts.length >= 2 && normalizeUrl(parts[1])) ? `<a href="${escapeHtml(normalizeUrl(parts[1]))}">${escapeHtml(parts[0])}</a>` : safe;
   }
-
   switch (style) {
     case 'normal': return safe;
     case 'title': return `🏆 <b>${escapeHtml((text||'').toUpperCase())}</b>\n━━━━━━━━━━━━━━━━━`;
@@ -194,19 +197,18 @@ function buildStyledHtml(style, text) {
 // ---------------- MENUS (Custom Reply Keyboard Layout) ----------------
 const REPLY_KEYBOARD = {
   keyboard: [[{ text: '📝 Text / Multi-Block' }, { text: '📎 Media / Album' }],[{ text: '💻 Raw HTML' }, { text: '🔄 Repost Msg' }],
-    [{ text: '🧹 Clear Screen' }, { text: '❌ Cancel Action' }]
+    [{ text: '🧹 Clear Action' }, { text: '❌ Reset Bot' }]
   ],
   resize_keyboard: true,
-  is_persistent: true // কীবোর্ড যেন সবসময় নিচে থাকে
+  is_persistent: true // এই লাইনের কারণেই ৪-স্কয়ারের বাটনটি সবসময় থাকবে!
 };
 
-const CANCEL_INLINE = { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'clear_screen' }]] };
+const CANCEL_INLINE = { inline_keyboard: [[{ text: '❌ Cancel Action', callback_data: 'clear_screen' }]] };
 
 function getStyleMenu(session) {
   const kb =[];
   if (session.mediaId || session.mediaAlbumItems) kb.push([{ text: '🚀 Skip Caption & Direct Post', callback_data: 'action_skip_caption' }]);
 
-  // 3-Column Compact Grid
   for (let i = 0; i < STYLES_LIST.length; i += 3) {
     const row =[];
     for(let j=0; j<3; j++) {
@@ -291,43 +293,46 @@ function extractAlbumItem(msg) {
   return null;
 }
 
-// ---------------- MESSAGE HANDLER (THE ENGINE) ----------------
+// ---------------- MESSAGE HANDLER ----------------
 bot.on('message', async (msg) => {
   const uid = String(msg.from?.id);
   const chatId = msg.chat.id;
 
   if (msg.chat.type !== 'private' || !isOwner(uid)) return;
 
-  // 1. Ghost Mode: Delete everything the user sends immediately!
+  // 1. Ghost Mode: Delete everything the user sends!
   if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
 
   const session = getSession(uid);
   session.chatId = chatId;
   const rawText = msg.text || msg.caption || '';
 
-  // 2. REPLY KEYBOARD BUTTON HANDLERS (The Custom Buttons)
-  if (rawText === '/start') {
+  // 2. সুন্দর ইনফরমেশন এবং কীবোর্ড অ্যাক্টিভেশন
+  if (rawText === '/start' || rawText === '❌ Reset Bot') {
     resetSession(uid);
-    // Send a temporary message to activate the keyboard, then delete it to keep screen blank!
-    const tempMsg = await bot.sendMessage(chatId, '✅ <b>Bot Activated!</b>\nনিচের বাটনগুলো ব্যবহার করুন।', { parse_mode: 'HTML', reply_markup: REPLY_KEYBOARD });
-    setTimeout(() => safeDelete(chatId, tempMsg.message_id), 3000);
+    // ছোট এবং সুন্দর ড্যাশবোর্ড
+    const infoText = `👑 <b>Channel Manager Pro</b>\n━━━━━━━━━━━━━━━━━━━━\n✨ <i>Bot is Active & Ready!</i>\n👇 নিচের মেনু বাটন থেকে আপনার কাজ শুরু করুন।`;
+    
+    // এই মেসেজটি ডিলিট হবে না, এটিই কীবোর্ডকে ধরে রাখবে
+    await bot.sendMessage(chatId, infoText, { parse_mode: 'HTML', reply_markup: REPLY_KEYBOARD });
     return;
   }
 
-  // Blank Screen Action
-  if (rawText === '🧹 Clear Screen' || rawText === '❌ Cancel Action') {
+  // Clear Action: বটের রানিং এডিটর মুছে ফেলবে কিন্তু মেনু ইনফো থেকে যাবে
+  if (rawText === '🧹 Clear Action') {
     resetSession(uid);
     if (session.lastBotMsgId) {
       await safeDelete(chatId, session.lastBotMsgId);
       session.lastBotMsgId = null;
     }
-    return; // Screen is now 100% blank
+    return; 
   }
 
+  // 3. REPLY KEYBOARD BUTTON HANDLERS
   if (rawText === '📝 Text / Multi-Block') {
     resetSession(uid);
     session.state = STATES.WAIT_TEXT;
-    return updateUI(chatId, uid, `📝 <b>Text Builder:</b>\n\nআপনার টেক্সট সেন্ড করুন:\n<i>(বাটন দিতে চাইলে সবার নিচে <code>BUTTONS:</code> লিখে লিংক দিন)</i>`, CANCEL_INLINE);
+    return updateUI(chatId, uid, `📝 <b>Text Builder:</b>\n\nআপনার টেক্সট সেন্ড করুন:\n<i>(বাটন দিতে চাইলে সবার নিচে <code>BUTTONS:</code> দিয়ে <code>Name | Link</code> লিখবেন)</i>`, CANCEL_INLINE);
   }
 
   if (rawText === '📎 Media / Album') {
@@ -348,21 +353,19 @@ bot.on('message', async (msg) => {
     return updateUI(chatId, uid, `🔄 <b>Repost Mode:</b>\n\nযে মেসেজটি চ্যানেলে দিতে চান সেটি এখানে Forward করুন:`, CANCEL_INLINE);
   }
 
-  // 3. AUTO-REPOST
+  // 4. AUTO-REPOST
   if (session.state === STATES.WAIT_REPOST || (session.state === STATES.IDLE && (msg.forward_from || msg.forward_from_chat || msg.forward_origin || msg.forward_date))) {
     try {
       if (bot.copyMessage) await bot.copyMessage(CHANNEL_ID, chatId, msg.message_id);
       else await bot.forwardMessage(CHANNEL_ID, chatId, msg.message_id);
       resetSession(uid);
-      const sent = await bot.sendMessage(chatId, `✅ <b>Successfully Reposted!</b>`, { parse_mode: 'HTML' });
-      setTimeout(() => safeDelete(chatId, sent.message_id), 3000); // Auto clean
-      return;
+      return updateUI(chatId, uid, `✅ <b>Successfully Reposted!</b>`, CANCEL_INLINE);
     } catch { 
       return updateUI(chatId, uid, `❌ <b>Failed:</b> Protected content.`, CANCEL_INLINE); 
     }
   }
 
-  // 4. MEDIA HANDLER
+  // 5. MEDIA HANDLER
   if ([STATES.IDLE, STATES.WAIT_MEDIA].includes(session.state) && (msg.photo || msg.video || msg.document || msg.audio || msg.voice || msg.animation || msg.sticker)) {
     if (msg.media_group_id) {
       const type = msg.photo ? 'photo' : 'video';
@@ -387,7 +390,7 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // 5. TEXT HANDLER
+  // 6. TEXT HANDLER
   if (!rawText.trim()) return;
 
   const { textOnly, buttons } = parseButtonsBlock(rawText);
@@ -419,25 +422,23 @@ bot.on('callback_query', async (query) => {
 
   if (data === 'clear_screen') {
     resetSession(uid);
-    if (session.lastBotMsgId) await safeDelete(chatId, session.lastBotMsgId);
-    return; // Leaves screen 100% blank!
+    if (session.lastBotMsgId) {
+      await safeDelete(chatId, session.lastBotMsgId);
+      session.lastBotMsgId = null;
+    }
+    return;
   }
 
   if (data.startsWith('pub_')) {
     const isSilent = data.includes('silent') || data === 'pub_spin';
     const isPin = data.includes('pin') || data === 'pub_spin';
     
-    const animId = await playPublishAnimation(chatId, uid);
+    await updateUI(chatId, uid, `⏳ <b>Publishing to Channel...</b>`);
     try {
       await executePublish(session, { silent: isSilent, pin: isPin });
       resetSession(uid);
-      await safeDelete(chatId, animId);
-      
-      // Auto-deleting success message to keep screen completely blank!
-      const successMsg = await bot.sendMessage(chatId, `✅ <b>Successfully Published!</b>`, { parse_mode: 'HTML' });
-      setTimeout(() => safeDelete(chatId, successMsg.message_id), 3000);
+      await updateUI(chatId, uid, `✅ <b>Successfully Published!</b>`, CANCEL_INLINE);
     } catch (e) {
-      await safeDelete(chatId, animId);
       return updateUI(chatId, uid, `❌ <b>Failed:</b> ${e.message}`, CANCEL_INLINE);
     }
     return;
@@ -460,8 +461,8 @@ bot.on('callback_query', async (query) => {
     if (!session.draftBlocks.length) session.draftButtons =[];
     if (!session.draftBlocks.length && !session.mediaId) {
       resetSession(uid);
-      if (session.lastBotMsgId) await safeDelete(chatId, session.lastBotMsgId);
-      return; // Clear completely
+      if (session.lastBotMsgId) { await safeDelete(chatId, session.lastBotMsgId); session.lastBotMsgId = null; }
+      return; 
     }
     return updateUI(chatId, uid, renderPendingPreview(session), getConfirmMenu(session));
   }
@@ -476,7 +477,12 @@ bot.on('callback_query', async (query) => {
 async function startBot() {
   console.log('🔄 Booting Bot...');
   await bot.deleteWebHook().catch(() => {});
+  
+  await bot.setMyCommands([
+    { command: 'start', description: 'Show Dashboard & Menu' }
+  ]);
+  
   await bot.startPolling();
-  console.log('🚀 Bot is live! Send /start to activate the custom keyboard.');
+  console.log('🚀 Bot is live with Persistent Button, Smooth Editing & No Crashes!');
 }
 startBot();

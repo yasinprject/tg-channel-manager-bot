@@ -27,14 +27,15 @@ function isOwner(uid) {
 // ---------------- EXPRESS (Health) ----------------
 const app = express();
 app.use(express.json());
-app.get('/', (req, res) => res.status(200).send('Channel Manager Pro is Online & Smooth.'));
-app.listen(PORT, () => console.log(`✅ Health server running on port :${PORT}`));
+app.get('/', (req, res) => res.status(200).send('Channel Manager Pro is Online & Crash-Free.'));
+app.listen(PORT, () => console.log(`✅ Server running on port :${PORT}`));
 
 // ---------------- BOT INITIALIZATION ----------------
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-process.on('unhandledRejection', e => console.error('UnhandledRejection:', e));
-process.on('uncaughtException', e => console.error('UncaughtException:', e));
+// ক্র্যাশ রোধ করার জন্য Error Handler
+process.on('unhandledRejection', e => console.log('UnhandledRejection Ignored.'));
+process.on('uncaughtException', e => console.log('UncaughtException Ignored.'));
 
 // ---------------- SESSION & STATES ----------------
 const STATES = Object.freeze({
@@ -57,27 +58,27 @@ function getSession(uid) {
       tempRawText: null,
       postType: 'text',
       mediaId: null,
-      album: { id: null, items:[], timer: null },
+      album: { items:[], timer: null },
       mediaAlbumItems: null,
       draftBlocks: [],
       draftButtons:[],
-      lastBotMsgId: null, 
+      lastBotMsgId: null, // বটের একমাত্র মেসেজ ট্র্যাক করবে
     };
   }
   return sessions[uid];
 }
 
-function resetSession(uid) {
+function resetSession(uid, keepLastMsg = true) {
   const chatId = sessions[uid]?.chatId ?? null;
   const lastMsg = sessions[uid]?.lastBotMsgId ?? null;
   if (sessions[uid]?.album?.timer) clearTimeout(sessions[uid].album.timer);
   
   sessions[uid] = getSession('dummy'); 
-  sessions[uid] = { ...sessions['dummy'], chatId: chatId, lastBotMsgId: lastMsg };
+  sessions[uid] = { ...sessions['dummy'], chatId: chatId, lastBotMsgId: keepLastMsg ? lastMsg : null };
   delete sessions['dummy'];
 }
 
-// ---------------- UTILITIES (SMOOTH UI LOGIC) ----------------
+// ---------------- UTILITIES (GHOST & EDIT LOGIC) ----------------
 function escapeHtml(text) {
   if (!text) return '';
   return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -87,39 +88,43 @@ async function safeDelete(chatId, msgId) {
   try { if (msgId) await bot.deleteMessage(chatId, msgId); } catch (_) {}
 }
 
-// 🌟 SMART UI UPDATER: এডিট করবে, ডিলিট করে রিফ্রেশ নিবে না!
-async function updateUI(chatId, uid, text, markup) {
+// 🌟 SMART UI UPDATER (শুধুমাত্র মেসেজ এডিট করবে, স্ক্রিন ফ্রেশ রাখবে)
+async function updateUI(chatId, uid, text, markupType = 'inline', customInlineKb = null) {
   const session = getSession(uid);
   bot.sendChatAction(chatId, 'typing').catch(() => {});
 
-  try {
-    if (session.lastBotMsgId) {
-      // মেসেজ এডিট করার চেষ্টা করবে, এতে স্ক্রিন কাঁপবে না
-      await bot.editMessageText(text, {
-        chat_id: chatId,
-        message_id: session.lastBotMsgId,
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-        reply_markup: markup
-      });
-    } else {
-      // যদি মেসেজ না থাকে তবে নতুন পাঠাবে
-      const payload = { parse_mode: 'HTML', disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}) };
-      const sent = await bot.sendMessage(chatId, text, payload);
-      session.lastBotMsgId = sent.message_id;
-    }
-  } catch (error) {
-    // যদি লেখা সেম হয়, ইগনোর করবে
-    if (error.response?.body?.description?.includes('exactly the same')) return;
-    
-    // এডিট ফেইল হলে ডিলিট করে নতুন পাঠাবে
-    await safeDelete(chatId, session.lastBotMsgId);
-    try {
-      const payload = { parse_mode: 'HTML', disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}) };
-      const sent = await bot.sendMessage(chatId, text, payload);
-      session.lastBotMsgId = sent.message_id;
-    } catch (err) {}
+  let replyMarkup = undefined;
+
+  // যদি Reply Keyboard (নিচের বাটন) দিতে হয়
+  if (markupType === 'reply') {
+    replyMarkup = {
+      keyboard: [[{ text: '📝 Text / Multi-Block' }, { text: '📎 Media / Album' }],[{ text: '💻 Raw HTML' }, { text: '🔄 Repost Msg' }],[{ text: '🧹 Clear Screen' }, { text: '❌ Cancel / Reset' }]
+      ],
+      resize_keyboard: true,
+      is_persistent: true // এই লাইনটিই আপনার ৪-স্কয়ার আইকনটিকে সবসময় ধরে রাখবে!
+    };
+  } else if (markupType === 'inline' && customInlineKb) {
+    replyMarkup = { inline_keyboard: customInlineKb };
   }
+
+  const payload = { parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: replyMarkup };
+
+  if (session.lastBotMsgId) {
+    try {
+      // আগের মেসেজটি এডিট করার চেষ্টা করবে
+      await bot.editMessageText(text, { chat_id: chatId, message_id: session.lastBotMsgId, ...payload });
+      return; // এডিট সফল হলে এখানেই শেষ
+    } catch (e) {
+      if (e.message.includes('exactly the same')) return; // লেখা সেম থাকলে কিছু করবে না
+    }
+  }
+
+  // যদি এডিট করা না যায় (মেসেজ ডিলিট হয়ে থাকলে), তবে পুরনোটা ডিলিট করে নতুন পাঠাবে
+  await safeDelete(chatId, session.lastBotMsgId);
+  try {
+    const sent = await bot.sendMessage(chatId, text, payload);
+    session.lastBotMsgId = sent.message_id;
+  } catch (err) { console.log('UI Send Error ignored.'); }
 }
 
 function normalizeUrl(url) {
@@ -194,16 +199,8 @@ function buildStyledHtml(style, text) {
   }
 }
 
-// ---------------- MENUS (Custom Reply Keyboard Layout) ----------------
-const REPLY_KEYBOARD = {
-  keyboard: [[{ text: '📝 Text / Multi-Block' }, { text: '📎 Media / Album' }],[{ text: '💻 Raw HTML' }, { text: '🔄 Repost Msg' }],
-    [{ text: '🧹 Clear Action' }, { text: '❌ Reset Bot' }]
-  ],
-  resize_keyboard: true,
-  is_persistent: true // এই লাইনের কারণেই ৪-স্কয়ারের বাটনটি সবসময় থাকবে!
-};
-
-const CANCEL_INLINE = { inline_keyboard: [[{ text: '❌ Cancel Action', callback_data: 'clear_screen' }]] };
+// ---------------- INLINE MENUS ----------------
+const CANCEL_INLINE = [[{ text: '❌ Cancel Action', callback_data: 'cancel_action' }]];
 
 function getStyleMenu(session) {
   const kb =[];
@@ -216,16 +213,16 @@ function getStyleMenu(session) {
     }
     kb.push(row);
   }
-  kb.push([{ text: '❌ Cancel Action', callback_data: 'clear_screen' }]);
-  return { inline_keyboard: kb };
+  kb.push([{ text: '❌ Cancel Action', callback_data: 'cancel_action' }]);
+  return kb;
 }
 
 function getConfirmMenu(session) {
-  const kb = [[{ text: '✅ Publish Post', callback_data: 'pub_normal' }, { text: '➕ Add Block', callback_data: 'action_add_block' }],[{ text: '🔕 Silent', callback_data: 'pub_silent' }, { text: '📌 Pin', callback_data: 'pub_pin' }, { text: '🔇 S+Pin', callback_data: 'pub_spin' }]
+  const kb =[[{ text: '✅ Publish Post', callback_data: 'pub_normal' }, { text: '➕ Add Block', callback_data: 'action_add_block' }],[{ text: '🔕 Silent', callback_data: 'pub_silent' }, { text: '📌 Pin', callback_data: 'pub_pin' }, { text: '🔇 S+Pin', callback_data: 'pub_spin' }]
   ];
   if (session.draftBlocks.length > 0) kb.push([{ text: '↩️ Undo Last Block', callback_data: 'action_undo_last' }]);
-  kb.push([{ text: '❌ Cancel Action', callback_data: 'clear_screen' }]);
-  return { inline_keyboard: kb };
+  kb.push([{ text: '❌ Cancel Action', callback_data: 'cancel_action' }]);
+  return kb;
 }
 
 function renderPendingPreview(session) {
@@ -270,27 +267,7 @@ async function executePublish(session, opts) {
     else if (session.postType === 'animation') sentMsg = await bot.sendAnimation(CHANNEL_ID, mId, sendOpts);
     else if (session.postType === 'sticker') sentMsg = await bot.sendSticker(CHANNEL_ID, mId, sendOpts);
   }
-
   if (opts.pin && sentMsg) await bot.pinChatMessage(CHANNEL_ID, sentMsg.message_id, { disable_notification: opts.silent });
-}
-
-// ---------------- MEDIA EXTRACTORS ----------------
-function extractSingleMedia(msg) {
-  if (msg.photo) return { postType: 'photo', mediaId: msg.photo[msg.photo.length - 1].file_id };
-  if (msg.video) return { postType: 'video', mediaId: msg.video.file_id };
-  if (msg.document) return { postType: 'document', mediaId: msg.document.file_id };
-  if (msg.audio) return { postType: 'audio', mediaId: msg.audio.file_id };
-  if (msg.voice) return { postType: 'voice', mediaId: msg.voice.file_id };
-  if (msg.animation) return { postType: 'animation', mediaId: msg.animation.file_id };
-  if (msg.sticker) return { postType: 'sticker', mediaId: msg.sticker.file_id };
-  if (msg.video_note) return { postType: 'video_note', mediaId: msg.video_note.file_id };
-  return null;
-}
-
-function extractAlbumItem(msg) {
-  if (msg.photo) return { type: 'photo', media: msg.photo[msg.photo.length - 1].file_id };
-  if (msg.video) return { type: 'video', media: msg.video.file_id };
-  return null;
 }
 
 // ---------------- MESSAGE HANDLER ----------------
@@ -300,72 +277,67 @@ bot.on('message', async (msg) => {
 
   if (msg.chat.type !== 'private' || !isOwner(uid)) return;
 
-  // 1. Ghost Mode: Delete everything the user sends!
+  // 1. Ghost Mode: Delete everything the user sends to keep screen completely blank!
   if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
 
   const session = getSession(uid);
   session.chatId = chatId;
   const rawText = msg.text || msg.caption || '';
 
-  // 2. সুন্দর ইনফরমেশন এবং কীবোর্ড অ্যাক্টিভেশন
-  if (rawText === '/start' || rawText === '❌ Reset Bot') {
-    resetSession(uid);
-    // ছোট এবং সুন্দর ড্যাশবোর্ড
-    const infoText = `👑 <b>Channel Manager Pro</b>\n━━━━━━━━━━━━━━━━━━━━\n✨ <i>Bot is Active & Ready!</i>\n👇 নিচের মেনু বাটন থেকে আপনার কাজ শুরু করুন।`;
-    
-    // এই মেসেজটি ডিলিট হবে না, এটিই কীবোর্ডকে ধরে রাখবে
-    await bot.sendMessage(chatId, infoText, { parse_mode: 'HTML', reply_markup: REPLY_KEYBOARD });
-    return;
+  // 2. REPLY KEYBOARD BUTTON HANDLERS
+  if (rawText === '/start' || rawText === '❌ Cancel / Reset') {
+    resetSession(uid, true);
+    // এই মেসেজটি রিপ্লাই কীবোর্ড (৪ স্কয়ার) নিয়ে আসবে।
+    const dashText = `👑 <b>Channel Manager Pro</b>\n━━━━━━━━━━━━━━━━━━━━\n✨ <i>Bot is Active & Ready!</i>\n👇 নিচের বাটনগুলো ব্যবহার করে কাজ শুরু করুন।`;
+    return updateUI(chatId, uid, dashText, 'reply');
   }
 
-  // Clear Action: বটের রানিং এডিটর মুছে ফেলবে কিন্তু মেনু ইনফো থেকে যাবে
-  if (rawText === '🧹 Clear Action') {
-    resetSession(uid);
+  if (rawText === '🧹 Clear Screen') {
+    resetSession(uid, false);
     if (session.lastBotMsgId) {
       await safeDelete(chatId, session.lastBotMsgId);
       session.lastBotMsgId = null;
     }
-    return; 
+    return; // একদম ফাঁকা স্ক্রিন!
   }
 
-  // 3. REPLY KEYBOARD BUTTON HANDLERS
   if (rawText === '📝 Text / Multi-Block') {
-    resetSession(uid);
+    resetSession(uid, true);
     session.state = STATES.WAIT_TEXT;
-    return updateUI(chatId, uid, `📝 <b>Text Builder:</b>\n\nআপনার টেক্সট সেন্ড করুন:\n<i>(বাটন দিতে চাইলে সবার নিচে <code>BUTTONS:</code> দিয়ে <code>Name | Link</code> লিখবেন)</i>`, CANCEL_INLINE);
+    return updateUI(chatId, uid, `📝 <b>Text Builder:</b>\n\nআপনার টেক্সট সেন্ড করুন:\n<i>(বাটন দিতে চাইলে সবার নিচে <code>BUTTONS:</code> দিয়ে <code>Name | Link</code> লিখবেন)</i>`, 'inline', CANCEL_INLINE);
   }
 
   if (rawText === '📎 Media / Album') {
-    resetSession(uid);
+    resetSession(uid, true);
     session.state = STATES.WAIT_MEDIA;
-    return updateUI(chatId, uid, `📎 <b>Media Builder:</b>\n\nযেকোনো ছবি, ভিডিও বা অ্যালবাম সেন্ড করুন:`, CANCEL_INLINE);
+    return updateUI(chatId, uid, `📎 <b>Media Builder:</b>\n\nযেকোনো ছবি, ভিডিও বা অ্যালবাম সেন্ড করুন:`, 'inline', CANCEL_INLINE);
   }
 
   if (rawText === '💻 Raw HTML') {
-    resetSession(uid);
+    resetSession(uid, true);
     session.state = STATES.WAIT_RAW;
-    return updateUI(chatId, uid, `💻 <b>Raw HTML Mode:</b>\n\nসরাসরি আপনার HTML কোড সেন্ড করুন:`, CANCEL_INLINE);
+    return updateUI(chatId, uid, `💻 <b>Raw HTML Mode:</b>\n\nসরাসরি আপনার HTML কোড সেন্ড করুন:`, 'inline', CANCEL_INLINE);
   }
 
   if (rawText === '🔄 Repost Msg') {
-    resetSession(uid);
+    resetSession(uid, true);
     session.state = STATES.WAIT_REPOST;
-    return updateUI(chatId, uid, `🔄 <b>Repost Mode:</b>\n\nযে মেসেজটি চ্যানেলে দিতে চান সেটি এখানে Forward করুন:`, CANCEL_INLINE);
+    return updateUI(chatId, uid, `🔄 <b>Repost Mode:</b>\n\nযে মেসেজটি চ্যানেলে দিতে চান সেটি এখানে Forward করুন:`, 'inline', CANCEL_INLINE);
   }
 
-  // 4. AUTO-REPOST
+  // 3. AUTO-REPOST
   if (session.state === STATES.WAIT_REPOST || (session.state === STATES.IDLE && (msg.forward_from || msg.forward_from_chat || msg.forward_origin || msg.forward_date))) {
     try {
       if (bot.copyMessage) await bot.copyMessage(CHANNEL_ID, chatId, msg.message_id);
       else await bot.forwardMessage(CHANNEL_ID, chatId, msg.message_id);
-      resetSession(uid);
-      return updateUI(chatId, uid, `✅ <b>Successfully Reposted!</b>`, CANCEL_INLINE);
+      resetSession(uid, true);
+      return updateUI(chatId, uid, `✅ <b>Successfully Reposted!</b>\n\n<i>নিচের মেনু থেকে নতুন কাজ শুরু করুন।</i>`, 'reply');
     } catch { 
-      return updateUI(chatId, uid, `❌ <b>Failed:</b> Protected content.`, CANCEL_INLINE); 
+      return updateUI(chatId, uid, `❌ <b>Failed:</b> Protected content.`, 'inline', CANCEL_INLINE); 
     }
   }
 
-  // 5. MEDIA HANDLER
+  // 4. MEDIA HANDLER
   if ([STATES.IDLE, STATES.WAIT_MEDIA].includes(session.state) && (msg.photo || msg.video || msg.document || msg.audio || msg.voice || msg.animation || msg.sticker)) {
     if (msg.media_group_id) {
       const type = msg.photo ? 'photo' : 'video';
@@ -378,19 +350,19 @@ bot.on('message', async (msg) => {
         session.mediaAlbumItems = session.album.items.slice();
         session.postType = 'album'; session.album.id = null;
         session.state = STATES.WAIT_TEXT;
-        updateUI(chatId, uid, `✅ <b>Album (${session.mediaAlbumItems.length}) Received!</b>\n\nক্যাপশন টেক্সট দিন অথবা স্কিপ করুন:`, getStyleMenu(session));
-      }, 1200);
+        updateUI(chatId, uid, `✅ <b>Album (${session.mediaAlbumItems.length}) Received!</b>\n\nক্যাপশন টেক্সট দিন অথবা স্কিপ করুন:`, 'inline', getStyleMenu(session));
+      }, 1000);
       return;
     } else {
       session.mediaId = (msg.photo?.pop() || msg.video || msg.document || msg.audio || msg.voice || msg.animation || msg.sticker).file_id;
       session.postType = msg.photo ? 'photo' : msg.video ? 'video' : msg.document ? 'document' : msg.audio ? 'audio' : msg.voice ? 'voice' : msg.animation ? 'animation' : 'sticker';
       session.state =['sticker', 'video_note'].includes(session.postType) ? STATES.WAIT_CONFIRM : STATES.WAIT_TEXT;
-      if (session.state === STATES.WAIT_CONFIRM) return updateUI(chatId, uid, renderPendingPreview(session), getConfirmMenu(session));
-      return updateUI(chatId, uid, `✅ <b>Media Detected!</b>\n\nক্যাপশন টেক্সট সেন্ড করুন অথবা স্কিপ করতে বাটনে চাপুন:`, getStyleMenu(session));
+      if (session.state === STATES.WAIT_CONFIRM) return updateUI(chatId, uid, renderPendingPreview(session), 'inline', getConfirmMenu(session));
+      return updateUI(chatId, uid, `✅ <b>Media Detected!</b>\n\nক্যাপশন টেক্সট সেন্ড করুন অথবা স্কিপ করতে বাটনে চাপুন:`, 'inline', getStyleMenu(session));
     }
   }
 
-  // 6. TEXT HANDLER
+  // 5. TEXT HANDLER
   if (!rawText.trim()) return;
 
   const { textOnly, buttons } = parseButtonsBlock(rawText);
@@ -399,17 +371,17 @@ bot.on('message', async (msg) => {
   if (session.state === STATES.WAIT_RAW) {
     session.draftBlocks.push(textOnly);
     session.state = STATES.WAIT_CONFIRM;
-    return updateUI(chatId, uid, renderPendingPreview(session), getConfirmMenu(session));
+    return updateUI(chatId, uid, renderPendingPreview(session), 'inline', getConfirmMenu(session));
   }
 
   if (session.state === STATES.IDLE || session.state === STATES.WAIT_TEXT) {
     session.tempRawText = textOnly;
     session.state = STATES.WAIT_STYLE;
-    return updateUI(chatId, uid, `🎨 <b>Select Style:</b>\n\nটেক্সটটির জন্য স্টাইল নির্বাচন করুন:`, getStyleMenu(session));
+    return updateUI(chatId, uid, `🎨 <b>Select Style:</b>\n\nটেক্সটটির জন্য স্টাইল নির্বাচন করুন:`, 'inline', getStyleMenu(session));
   }
 });
 
-// ---------------- CALLBACK QUERY HANDLER (INLINE BUTTONS) ----------------
+// ---------------- CALLBACK QUERY HANDLER ----------------
 bot.on('callback_query', async (query) => {
   const uid = String(query.from.id);
   const chatId = query.message.chat.id;
@@ -420,13 +392,9 @@ bot.on('callback_query', async (query) => {
   const session = getSession(uid);
   session.chatId = chatId;
 
-  if (data === 'clear_screen') {
-    resetSession(uid);
-    if (session.lastBotMsgId) {
-      await safeDelete(chatId, session.lastBotMsgId);
-      session.lastBotMsgId = null;
-    }
-    return;
+  if (data === 'cancel_action') {
+    resetSession(uid, true);
+    return updateUI(chatId, uid, `👑 <b>Channel Manager Pro</b>\n━━━━━━━━━━━━━━━━━━━━\n✨ <i>Action Cancelled.</i>\n👇 নিচের মেনু বাটন থেকে আবার কাজ শুরু করুন।`, 'reply');
   }
 
   if (data.startsWith('pub_')) {
@@ -436,40 +404,38 @@ bot.on('callback_query', async (query) => {
     await updateUI(chatId, uid, `⏳ <b>Publishing to Channel...</b>`);
     try {
       await executePublish(session, { silent: isSilent, pin: isPin });
-      resetSession(uid);
-      await updateUI(chatId, uid, `✅ <b>Successfully Published!</b>`, CANCEL_INLINE);
+      resetSession(uid, true);
+      return updateUI(chatId, uid, `✅ <b>Successfully Published!</b>\n\n<i>নিচের মেনু থেকে নতুন কাজ শুরু করুন।</i>`, 'reply');
     } catch (e) {
-      return updateUI(chatId, uid, `❌ <b>Failed:</b> ${e.message}`, CANCEL_INLINE);
+      return updateUI(chatId, uid, `❌ <b>Failed:</b> ${e.message}`, 'inline', CANCEL_INLINE);
     }
-    return;
   }
 
   if (data === 'action_add_block') {
     session.state = STATES.WAIT_TEXT;
-    return updateUI(chatId, uid, `✏️ <b>Next Block:</b>\n\nটেক্সট সেন্ড করুন:`, CANCEL_INLINE);
+    return updateUI(chatId, uid, `✏️ <b>Next Block:</b>\n\nটেক্সট সেন্ড করুন:`, 'inline', CANCEL_INLINE);
   }
 
   if (data.startsWith('style_')) {
     const styleId = data.replace('style_', '');
     session.draftBlocks.push(buildStyledHtml(styleId, session.tempRawText));
     session.state = STATES.WAIT_CONFIRM;
-    return updateUI(chatId, uid, renderPendingPreview(session), getConfirmMenu(session));
+    return updateUI(chatId, uid, renderPendingPreview(session), 'inline', getConfirmMenu(session));
   }
 
   if (data === 'action_undo_last') {
     session.draftBlocks.pop();
     if (!session.draftBlocks.length) session.draftButtons =[];
     if (!session.draftBlocks.length && !session.mediaId) {
-      resetSession(uid);
-      if (session.lastBotMsgId) { await safeDelete(chatId, session.lastBotMsgId); session.lastBotMsgId = null; }
-      return; 
+      resetSession(uid, true);
+      return updateUI(chatId, uid, `🧹 Draft Cleared.`, 'reply');
     }
-    return updateUI(chatId, uid, renderPendingPreview(session), getConfirmMenu(session));
+    return updateUI(chatId, uid, renderPendingPreview(session), 'inline', getConfirmMenu(session));
   }
 
   if (data === 'action_skip_caption') {
     session.state = STATES.WAIT_CONFIRM;
-    return updateUI(chatId, uid, renderPendingPreview(session), getConfirmMenu(session));
+    return updateUI(chatId, uid, renderPendingPreview(session), 'inline', getConfirmMenu(session));
   }
 });
 
@@ -478,11 +444,8 @@ async function startBot() {
   console.log('🔄 Booting Bot...');
   await bot.deleteWebHook().catch(() => {});
   
-  await bot.setMyCommands([
-    { command: 'start', description: 'Show Dashboard & Menu' }
-  ]);
-  
+  await bot.setMyCommands([{ command: 'start', description: 'Show Bot Menu' }]);
   await bot.startPolling();
-  console.log('🚀 Bot is live with Persistent Button, Smooth Editing & No Crashes!');
+  console.log('🚀 Bot is live with Persistent Button, Smooth Editing & Anti-Crash System!');
 }
 startBot();

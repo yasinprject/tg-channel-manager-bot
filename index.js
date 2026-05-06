@@ -27,7 +27,7 @@ function isOwner(uid) {
 // ---------------- EXPRESS (Health) ----------------
 const app = express();
 app.use(express.json());
-app.get('/', (req, res) => res.status(200).send('Channel Manager Pro Bot is Online & Running Perfectly.'));
+app.get('/', (req, res) => res.status(200).send('Channel Manager Pro Bot is Online.'));
 const server = app.listen(PORT, () => console.log(`Health server running on :${PORT}`));
 server.on('error', (err) => {
   console.error('Express server error:', err?.message || err);
@@ -51,6 +51,8 @@ const STATES = Object.freeze({
   WAIT_STYLE_PREVIEW: 'WAIT_STYLE_PREVIEW',
   WAIT_TEXT: 'WAIT_TEXT',
   WAIT_RAW: 'WAIT_RAW',
+  WAIT_SPOILER: 'WAIT_SPOILER',
+  WAIT_REPOST: 'WAIT_REPOST',
   WAIT_CONFIRM: 'WAIT_CONFIRM',
 });
 
@@ -62,11 +64,11 @@ function defaultSession() {
     state: STATES.IDLE,
     mode: null,
     selectedStyle: 'normal',
-    stylePage: 0, // NEW: For Style Pagination
+    stylePage: 0, // Style Pagination
     previewStyle: null,
     postType: 'text',
     mediaId: null,
-    album: { id: null, items: [], timer: null },
+    album: { id: null, items:[], timer: null },
     mediaAlbumItems: null,
     draftBlocks:[],
     draftButtons:[],
@@ -114,9 +116,7 @@ async function playPublishAnimation(chatId) {
     await new Promise(r => setTimeout(r, 400));
     await bot.editMessageText(`🚀 <b>Publishing...</b>`, { chat_id: chatId, message_id: msg.message_id, parse_mode: 'HTML' }).catch(() => {});
     return msg.message_id;
-  } catch (e) {
-    return null;
-  }
+  } catch (e) { return null; }
 }
 
 function normalizeUrl(url) {
@@ -189,47 +189,25 @@ function buildStyledHtml(style, plainText) {
 }
 
 function buildStylePreview(style) {
-  const demoTextMap = {
-    normal: 'Normal style example', title: 'Title style example',
-    bold: 'Bold style example', italic: 'Italic style example',
-    underline: 'Underline style example', strike: 'Strike style example',
-    heading: 'Heading style example', quote: 'Quote style example',
-    expand_quote: 'Expand Quote style example', spoiler: 'Spoiler style example',
-    code: 'Inline Code Example', pre: 'Code Block Example',
-    bullets: 'Point 1\nPoint 2\nPoint 3', numbered: 'Step 1\nStep 2\nStep 3',
-    pros: 'Fast\nClean', cons: 'Limit 1\nLimit 2',
-    note: 'Important Note', warning: 'Warning Message',
-    signature: 'Yasin', center: 'Centered Style', divider: '', highlight: 'Highlight style example', mono_quote: 'Monospace quoted', link: 'Google | https://google.com',
-  };
   if (style === 'link') return `<a href="https://google.com">Google</a>`;
-  return buildStyledHtml(style, demoTextMap[style] ?? 'Sample Preview');
+  return buildStyledHtml(style, 'এটি স্টাইলের একটি ডেমো উদাহরণ');
 }
 
-// ---------------- MENUS (SMART & CLEAN) ----------------
+// ---------------- MENUS (MANUAL + SMART) ----------------
 const MAIN_MENU = {
-  inline_keyboard: [[{ text: '🧱 Create Multi-Block', callback_data: 'mode_multi' }, { text: '📝 Raw HTML', callback_data: 'mode_raw' }],
-    [{ text: '❌ Reset Bot', callback_data: 'reset' }],
+  inline_keyboard: [[{ text: '⚡ Quick Text', callback_data: 'mode_quick' }, { text: '🧱 Multi Block', callback_data: 'mode_multi' }],[{ text: '📎 Media / Album', callback_data: 'mode_media' }, { text: '📝 Raw HTML', callback_data: 'mode_raw' }],[{ text: '😶‍🌫️ Spoiler', callback_data: 'mode_spoiler' }, { text: '🔄 Repost', callback_data: 'mode_repost' }],[{ text: '❌ Reset Bot', callback_data: 'reset' }],
   ],
 };
 
 const CANCEL_MENU = { inline_keyboard: [[{ text: '🔙 Cancel', callback_data: 'cancel' }]] };
 
 const STYLES =[
-  // Page 1 (Basic & Most Used)
-  { id: 'normal', text: 'Normal 🔤' }, { id: 'title', text: '🏆 Title' },
-  { id: 'bold', text: 'Bold' }, { id: 'italic', text: 'Italic' },
-  { id: 'heading', text: '🔹 Heading' }, { id: 'spoiler', text: '🌫️ Spoiler' },
-  { id: 'quote', text: '❝ Quote' }, { id: 'link', text: '🔗 Text Link' },
-  // Page 2 (Lists & Code)
-  { id: 'bullets', text: '• Bullets' }, { id: 'numbered', text: '1️⃣ Numbered' },
-  { id: 'pros', text: '✅ Pros' }, { id: 'cons', text: '❌ Cons' },
-  { id: 'code', text: 'Code (Inline)' }, { id: 'pre', text: 'Code Block' },
-  { id: 'expand_quote', text: '📖 Exp. Quote' }, { id: 'mono_quote', text: '🧾 Mono Quote' },
-  // Page 3 (Highlights & Extras)
-  { id: 'note', text: '📌 Note' }, { id: 'warning', text: '⚠️ Warning' },
-  { id: 'highlight', text: '✨ Highlight' }, { id: 'center', text: '🎯 Center' },
-  { id: 'strike', text: 'Strike' }, { id: 'underline', text: 'Underline' },
-  { id: 'divider', text: '➖ Divider' }, { id: 'signature', text: '✍️ Signature' },
+  { id: 'normal', text: 'Normal 🔤' }, { id: 'title', text: '🏆 Title' }, { id: 'bold', text: 'Bold' }, { id: 'italic', text: 'Italic' },
+  { id: 'heading', text: '🔹 Heading' }, { id: 'spoiler', text: '🌫️ Spoiler' }, { id: 'quote', text: '❝ Quote' }, { id: 'link', text: '🔗 Link' },
+  { id: 'bullets', text: '• Bullets' }, { id: 'numbered', text: '1️⃣ Numbered' }, { id: 'pros', text: '✅ Pros' }, { id: 'cons', text: '❌ Cons' },
+  { id: 'code', text: 'Code (Inline)' }, { id: 'pre', text: 'Code Block' }, { id: 'expand_quote', text: '📖 Exp. Quote' }, { id: 'mono_quote', text: '🧾 Mono Quote' },
+  { id: 'note', text: '📌 Note' }, { id: 'warning', text: '⚠️ Warning' }, { id: 'highlight', text: '✨ Highlight' }, { id: 'center', text: '🎯 Center' },
+  { id: 'strike', text: 'Strike' }, { id: 'underline', text: 'Underline' }, { id: 'divider', text: '➖ Divider' }, { id: 'signature', text: '✍️ Signature' },
 ];
 
 function getStyleMenu(session) {
@@ -243,7 +221,6 @@ function getStyleMenu(session) {
   const pageStyles = STYLES.slice(start, start + itemsPerPage);
 
   const keyboard =[];
-  
   if (session.mode === 'media' && (session.mediaId || session.mediaAlbumItems)) {
     keyboard.push([{ text: '🚀 Skip Caption (Direct Post)', callback_data: 'action_skip_caption' }]);
   }
@@ -254,7 +231,7 @@ function getStyleMenu(session) {
     keyboard.push(row);
   }
 
-  // Pagination Buttons
+  // Pagination
   keyboard.push([
     { text: '⬅️ Prev', callback_data: 'page_prev' },
     { text: `📄 Page ${session.stylePage + 1}/${totalPages}`, callback_data: 'noop' },
@@ -271,11 +248,7 @@ function getStyleMenu(session) {
 }
 
 function getStylePreviewMenu() {
-  return {
-    inline_keyboard: [[{ text: '✅ Use This Style', callback_data: 'action_use_previewed_style' }],[{ text: '🔙 Back to Styles', callback_data: 'action_back_to_styles' }],
-      [{ text: '❌ Cancel', callback_data: 'cancel' }],
-    ],
-  };
+  return { inline_keyboard: [[{ text: '✅ Use This Style', callback_data: 'action_use_previewed_style' }],[{ text: '🔙 Back to Styles', callback_data: 'action_back_to_styles' }],[{ text: '❌ Cancel', callback_data: 'cancel' }]] };
 }
 
 function getEditorMenu(styleId) {
@@ -437,7 +410,7 @@ bot.onText(/^\/(start|menu|cancel|ping)$/i, async (msg, match) => {
   resetSession(uid, cmd !== 'start');
   getSession(uid).chatId = chatId;
   
-  const welcomeText = `👑 <b>Channel Manager Pro</b>\n\n👇 <b>কোনো মোড সিলেক্ট করার দরকার নেই! জাস্ট:</b>\n• সরাসরি Text সেন্ড করুন।\n• ছবি বা ভিডিও সেন্ড করুন।\n• Repost করতে চাইলে যেকোনো মেসেজ Forward করুন।\n\n<i>অথবা নিচের Advanced Mode ব্যবহার করুন:</i>`;
+  const welcomeText = `👑 <b>Channel Manager Pro</b>\n\n👇 <b>Smart Auto-Detect Mode:</b>\n• সরাসরি Text সেন্ড করুন।\n• ছবি, ভিডিও বা ফাইল সেন্ড করুন।\n• যেকোনো মেসেজ Forward করুন (Repost)।\n\n<i>অথবা নিচের মেনু থেকে মোড নির্বাচন করুন:</i>`;
   await updateUI(chatId, uid, welcomeText, MAIN_MENU);
 });
 
@@ -451,7 +424,7 @@ bot.on('callback_query', async (query) => {
   const session = getSession(uid);
   session.chatId = chatId;
 
-  if (data === 'noop') return; // For Pagination page number indicator
+  if (data === 'noop') return;
   if (data === 'cancel' || data === 'reset') {
     resetSession(uid, true);
     return updateUI(chatId, uid, `🏠 <b>Main Menu</b>\n\nঅপারেশন বাতিল করা হয়েছে।`, MAIN_MENU);
@@ -486,23 +459,30 @@ bot.on('callback_query', async (query) => {
   if (data === 'confirm_edit') {
     if (!session.mode) return updateUI(chatId, uid, `🏠 <b>Main Menu</b>`, MAIN_MENU);
     if (session.mode === 'raw') { session.state = STATES.WAIT_RAW; return updateUI(chatId, uid, `📝 <b>Raw HTML</b>\n\nআবার HTML পাঠান:`, CANCEL_MENU); }
+    if (session.mode === 'spoiler') { session.state = STATES.WAIT_SPOILER; return updateUI(chatId, uid, `😶‍🌫️ <b>Spoiler</b>\n\nআবার টেক্সট পাঠান:`, CANCEL_MENU); }
     
     session.state = session.mode === 'multi' ? STATES.WAIT_STYLE : STATES.WAIT_TEXT;
     return updateUI(chatId, uid, session.mode === 'multi' ? `🧱 <b>Multi-Block</b>\n\nস্টাইল সিলেক্ট করুন:` : `✏️ <b>Edit Text:</b>\n\nনতুন করে লিখে পাঠান।`, session.mode === 'multi' ? getStyleMenu(session) : CANCEL_MENU);
   }
 
-  // Advanced Modes from Menu
+  // RESTORED MANUAL MODES FROM MENU
   if (data.startsWith('mode_')) {
     const selectedMode = data.replace('mode_', '');
     resetSession(uid, true);
     const s = getSession(uid);
     s.chatId = chatId; s.mode = selectedMode;
 
-    if (selectedMode === 'multi') {
+    if (selectedMode === 'quick' || selectedMode === 'multi') {
       s.state = STATES.WAIT_STYLE; s.postType = 'text';
-      return updateUI(chatId, uid, `🧱 <b>Multi-Block Mode</b>\n\nস্টাইল নির্বাচন করুন:`, getStyleMenu(s));
+      return updateUI(chatId, uid, `🎨 <b>${selectedMode === 'quick' ? 'Quick Text' : 'Multi-Block'} Mode</b>\n\nস্টাইল নির্বাচন করুন:`, getStyleMenu(s));
+    }
+    if (selectedMode === 'media') {
+      s.state = STATES.WAIT_MEDIA;
+      return updateUI(chatId, uid, `📎 <b>Media Mode</b>\n\nছবি, ভিডিও, ডকুমেন্ট বা অ্যালবাম পাঠান:`, CANCEL_MENU);
     }
     if (selectedMode === 'raw') { s.state = STATES.WAIT_RAW; return updateUI(chatId, uid, `📝 <b>Raw HTML Mode</b>\n\nHTML পাঠান।`, CANCEL_MENU); }
+    if (selectedMode === 'spoiler') { s.state = STATES.WAIT_SPOILER; return updateUI(chatId, uid, `😶‍🌫️ <b>Spoiler Mode</b>\n\nটেক্সট পাঠান:`, CANCEL_MENU); }
+    if (selectedMode === 'repost') { s.state = STATES.WAIT_REPOST; return updateUI(chatId, uid, `🔄 <b>Repost Mode</b>\n\nযে মেসেজ কপি করতে চান সেটি forward/send করুন:`, CANCEL_MENU); }
   }
 
   // Style Selection
@@ -551,7 +531,7 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-// ---------------- MESSAGE HANDLER (ZERO-CLICK AUTO-DETECT) ----------------
+// ---------------- MESSAGE HANDLER ----------------
 bot.on('message', async (msg) => {
   const uid = String(msg.from?.id);
   if (!isOwner(uid) || msg.from?.is_bot || msg.chat.type !== 'private') return;
@@ -561,25 +541,26 @@ bot.on('message', async (msg) => {
   const session = getSession(uid);
   session.chatId = chatId;
 
-  // AUTO REPOST DETECTION
-  if (session.state === STATES.IDLE && (msg.forward_from || msg.forward_from_chat || msg.forward_origin || msg.forward_date)) {
+  // REPOST HANDLER (Manual & Auto)
+  if (session.state === STATES.WAIT_REPOST || (session.state === STATES.IDLE && (msg.forward_from || msg.forward_from_chat || msg.forward_origin || msg.forward_date))) {
     try {
       if (bot.copyMessage) await bot.copyMessage(CHANNEL_ID, chatId, msg.message_id);
       else await bot.forwardMessage(CHANNEL_ID, chatId, msg.message_id);
       if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
-      return updateUI(chatId, uid, `✅ <b>Message Reposted Automatically!</b> 🚀`, MAIN_MENU);
+      resetSession(uid, true);
+      return updateUI(chatId, uid, `✅ <b>Message Reposted Successfully!</b> 🚀`, MAIN_MENU);
     } catch (e) {
       if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
       return updateUI(chatId, uid, `❌ <b>Copy failed:</b> Protected content.`, CANCEL_MENU);
     }
   }
 
-  // AUTO MEDIA / TEXT DETECTION
+  // AUTO MEDIA / TEXT DETECTION (If IDLE)
   if (session.state === STATES.IDLE) {
     if (msg.media_group_id || extractSingleMedia(msg)) {
       session.mode = 'media';
       session.state = STATES.WAIT_MEDIA;
-      // Let it fall through
+      // Let it fall through to WAIT_MEDIA
     } else if (msg.text) {
       session.mode = 'quick';
       const { textOnly, buttons } = parseButtonsBlock(msg.text);
@@ -629,9 +610,9 @@ bot.on('message', async (msg) => {
   const plainText = textOnly.trim();
   const replyMarkup = buttons.length ? { inline_keyboard: buttons } : null;
 
-  // RAW HANDLER
-  if (session.state === STATES.WAIT_RAW) {
-    session.pending = { kind: 'text', html: plainText, rawHtml: plainText, buttons: replyMarkup, previewHtmlMode: false };
+  // RAW / SPOILER HANDLER
+  if (session.state === STATES.WAIT_RAW || session.state === STATES.WAIT_SPOILER) {
+    session.pending = { kind: 'text', html: session.state === STATES.WAIT_SPOILER ? `<tg-spoiler>${escapeHtml(plainText)}</tg-spoiler>` : plainText, rawHtml: plainText, buttons: replyMarkup, previewHtmlMode: session.state !== STATES.WAIT_RAW };
     session.state = STATES.WAIT_CONFIRM;
     return updateUI(chatId, uid, renderPendingPreview(session), getConfirmMenu(session));
   }
@@ -675,10 +656,15 @@ bot.on('message', async (msg) => {
 
 // ---------------- STARTUP ----------------
 async function startBot() {
-  console.log('Starting Smart UI Bot...');
+  console.log('Starting Master Bot...');
   await bot.deleteWebHook().catch(() => {});
   await bot.startPolling();
-  await bot.setMyCommands([{ command: 'start', description: 'Open Main Menu / Restart' }]);
-  console.log('Bot is live and running with Smart UX Updates!');
+  await bot.setMyCommands([
+    { command: 'start', description: 'Start / Open Main Menu' },
+    { command: 'menu', description: 'Open Main Menu' },
+    { command: 'cancel', description: 'Cancel current operation' },
+    { command: 'ping', description: 'Check Bot Status' }
+  ]);
+  console.log('Bot is live and running with ALL MANUAL + SMART Features!');
 }
 startBot();

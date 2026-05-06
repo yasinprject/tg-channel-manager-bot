@@ -31,7 +31,6 @@ app.get('/', (req, res) => res.status(200).send('Channel Manager Pro Bot is Onli
 app.listen(PORT, () => console.log(`✅ Health server running on port :${PORT}`));
 
 // ---------------- BOT INITIALIZATION ----------------
-// FIX: Polling natively set to true for zero conflict
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 process.on('unhandledRejection', e => console.error('UnhandledRejection:', e));
@@ -88,7 +87,6 @@ async function safeDelete(chatId, msgId) {
   try { if (msgId) await bot.deleteMessage(chatId, msgId); } catch (_) {}
 }
 
-// FIX: Bulletproof UI Updater
 async function updateUI(chatId, uid, text, markup) {
   const session = getSession(uid);
   bot.sendChatAction(chatId, 'typing').catch(() => {});
@@ -104,7 +102,7 @@ async function updateUI(chatId, uid, text, markup) {
     session.lastBotMsgId = sent.message_id;
   } catch (error) {
     console.error("UI Update Error:", error.message);
-    const sent = await bot.sendMessage(chatId, `⚠️ <b>Error:</b> ${error.message}\n\nআপনার টেক্সট বা HTML এ ভুল আছে, আবার চেষ্টা করুন।`, { parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: '🧹 Clear Screen', callback_data: 'clear_screen' }]] } });
+    const sent = await bot.sendMessage(chatId, `⚠️ <b>Error:</b> ${error.message}\n\nআপনার টেক্সট বা HTML এ ভুল আছে, আবার চেষ্টা করুন।`, { parse_mode: 'HTML' });
     session.lastBotMsgId = sent.message_id;
   }
 }
@@ -194,19 +192,24 @@ function buildStyledHtml(style, text) {
   }
 }
 
-// ---------------- MENUS ----------------
-const MAIN_MENU = {
-  inline_keyboard: [[{ text: '📝 Text / Multi Block', callback_data: 'cmd_text' }, { text: '📎 Media / Album', callback_data: 'cmd_media' }],[{ text: '💻 Raw HTML', callback_data: 'cmd_raw' }, { text: '🔄 Repost Msg', callback_data: 'cmd_repost' }],[{ text: '🧹 Clear Screen', callback_data: 'clear_screen' }]
-  ]
+// ---------------- MENUS (REPLY KEYBOARD DESIGN) ----------------
+
+// The beautiful bottom Reply Keyboard as shown in your screenshot
+const REPLY_KEYBOARD = {
+  keyboard: [[{ text: '📝 Text / Multi-Block' }, { text: '📎 Media / Album' }],
+    [{ text: '💻 Raw HTML' }, { text: '🔄 Repost Msg' }],
+    [{ text: '🧹 Clear Screen' }, { text: '❌ Cancel / Reset' }]
+  ],
+  resize_keyboard: true,
+  is_persistent: true
 };
 
-const CANCEL_MENU = { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'clear_screen' }]] };
+const CANCEL_INLINE_MENU = { inline_keyboard: [[{ text: '❌ Cancel Action', callback_data: 'clear_screen' }]] };
 
 function getStyleMenu(session) {
   const kb =[];
   if (session.mediaId || session.mediaAlbumItems) kb.push([{ text: '🚀 Skip Caption & Use Original Media', callback_data: 'action_skip_caption' }]);
 
-  // Compact 3-Column Layout
   for (let i = 0; i < STYLES_LIST.length; i += 3) {
     const row =[];
     for(let j=0; j<3; j++) {
@@ -214,7 +217,7 @@ function getStyleMenu(session) {
     }
     kb.push(row);
   }
-  kb.push([{ text: '❌ Cancel & Clear Screen', callback_data: 'clear_screen' }]);
+  kb.push([{ text: '❌ Cancel Action', callback_data: 'clear_screen' }]);
   return { inline_keyboard: kb };
 }
 
@@ -222,7 +225,7 @@ function getConfirmMenu(session) {
   const kb = [[{ text: '✅ Publish Post', callback_data: 'pub_normal' }, { text: '➕ Add Block', callback_data: 'action_add_block' }],[{ text: '🔕 Silent', callback_data: 'pub_silent' }, { text: '📌 Pin', callback_data: 'pub_pin' }, { text: '🔇 S+Pin', callback_data: 'pub_spin' }]
   ];
   if (session.draftBlocks.length > 0) kb.push([{ text: '↩️ Undo Last Block', callback_data: 'action_undo_last' }]);
-  kb.push([{ text: '❌ Cancel & Clear Screen', callback_data: 'clear_screen' }]);
+  kb.push([{ text: '❌ Cancel Action', callback_data: 'clear_screen' }]);
   return { inline_keyboard: kb };
 }
 
@@ -291,59 +294,60 @@ function extractAlbumItem(msg) {
   return null;
 }
 
-// ---------------- MESSAGE HANDLER (SINGLE SOURCE OF TRUTH) ----------------
+// ---------------- MESSAGE HANDLER (REPLY KEYBOARD & INPUT) ----------------
 bot.on('message', async (msg) => {
   const uid = String(msg.from?.id);
   const chatId = msg.chat.id;
 
-  // Security Check
-  if (msg.chat.type !== 'private') return;
-  if (!isOwner(uid)) {
-    console.log(`[AUTH FAILED] User ${uid} tried to access the bot.`);
-    return;
-  }
+  // Authentication
+  if (msg.chat.type !== 'private' || !isOwner(uid)) return;
 
   // Ghost Mode: Delete the message user just sent instantly!
   if (GHOST_MODE) await safeDelete(chatId, msg.message_id);
 
   const session = getSession(uid);
   session.chatId = chatId;
+  const rawText = msg.text || msg.caption || '';
 
-  // 1. COMMANDS (Triggers from Text or Menu Button)
-  if (msg.text?.startsWith('/')) {
-    const cmd = msg.text.split(' ')[0].toLowerCase();
+  // 1. REPLY KEYBOARD BUTTON HANDLERS
+  if (rawText === '/start' || rawText === '❌ Cancel / Reset') {
+    resetSession(uid, true);
+    // Send the Reply Keyboard menu
+    await bot.sendMessage(chatId, '👑 <b>Channel Manager Pro Ready</b>\n\nনিচের কাস্টম কীবোর্ড থেকে অপশন সিলেক্ট করুন:', {
+        parse_mode: 'HTML',
+        reply_markup: REPLY_KEYBOARD
+    });
+    return updateUI(chatId, uid, `👇 <b>Bot Menu:</b>\n\nনিচের বাটনগুলো ব্যবহার করে কাজ শুরু করুন।`, { inline_keyboard: [[{ text: '🧹 Clear Chat Screen', callback_data: 'clear_screen' }]] });
+  }
 
-    if (cmd === '/ping') {
-      const sent = await bot.sendMessage(chatId, '✅ Bot is fast & perfectly active!');
-      setTimeout(() => safeDelete(chatId, sent.message_id), 3000);
-      return;
-    }
+  if (rawText === '🧹 Clear Screen') {
+    resetSession(uid, false);
+    if (session.lastBotMsgId) await safeDelete(chatId, session.lastBotMsgId);
+    return; // Completely empty screen!
+  }
 
-    resetSession(uid, true); // Reset session state for new action
+  if (rawText === '📝 Text / Multi-Block') {
+    resetSession(uid, true);
+    session.state = STATES.WAIT_TEXT;
+    return updateUI(chatId, uid, `📝 <b>Text Builder:</b>\n\nআপনার টেক্সট সেন্ড করুন:\n<i>(বাটন দিতে চাইলে সবার নিচে <code>BUTTONS:</code> দিয়ে <code>Name | Link</code> লিখবেন)</i>`, CANCEL_INLINE_MENU);
+  }
 
-    if (cmd === '/start' || cmd === '/menu') {
-      return updateUI(chatId, uid, `👑 <b>Channel Manager Pro</b>\n\n👇 <b>Smart Auto-Detect:</b>\n• সরাসরি Text, ছবি বা ফাইল সেন্ড করুন।\n• Repost করতে চাইলে Forward করুন।\n\n<i>অথবা নিচের মেনু থেকে মোড নির্বাচন করুন:</i>`, MAIN_MENU);
-    }
-    if (cmd === '/cancel') {
-      return updateUI(chatId, uid, `🧹 Action Cancelled. Screen is cleared.`, { inline_keyboard: [[{ text: '🧹 Clear Screen Fully', callback_data: 'clear_screen' }]] });
-    }
-    if (cmd === '/text') {
-      session.state = STATES.WAIT_TEXT;
-      return updateUI(chatId, uid, `📝 <b>Text Builder:</b>\n\nআপনার টেক্সট সেন্ড করুন:\n<i>(বাটন দিতে চাইলে সবার নিচে <code>BUTTONS:</code> দিয়ে <code>Name | Link</code> লিখবেন)</i>`, CANCEL_MENU);
-    }
-    if (cmd === '/media') {
-      session.state = STATES.WAIT_MEDIA;
-      return updateUI(chatId, uid, `📎 <b>Media Builder:</b>\n\nযেকোনো ছবি, ভিডিও বা অ্যালবাম সেন্ড করুন:`, CANCEL_MENU);
-    }
-    if (cmd === '/raw') {
-      session.state = STATES.WAIT_RAW;
-      return updateUI(chatId, uid, `💻 <b>Raw HTML Mode:</b>\n\nসরাসরি আপনার কোড সেন্ড করুন:`, CANCEL_MENU);
-    }
-    if (cmd === '/repost') {
-      session.state = STATES.WAIT_REPOST;
-      return updateUI(chatId, uid, `🔄 <b>Repost Mode:</b>\n\nযে মেসেজটি চ্যানেলে দিতে চান সেটি এখানে Forward করুন:`, CANCEL_MENU);
-    }
-    return;
+  if (rawText === '📎 Media / Album') {
+    resetSession(uid, true);
+    session.state = STATES.WAIT_MEDIA;
+    return updateUI(chatId, uid, `📎 <b>Media Builder:</b>\n\nযেকোনো ছবি, ভিডিও বা অ্যালবাম সেন্ড করুন:`, CANCEL_INLINE_MENU);
+  }
+
+  if (rawText === '💻 Raw HTML') {
+    resetSession(uid, true);
+    session.state = STATES.WAIT_RAW;
+    return updateUI(chatId, uid, `💻 <b>Raw HTML Mode:</b>\n\nসরাসরি আপনার কোড সেন্ড করুন:`, CANCEL_INLINE_MENU);
+  }
+
+  if (rawText === '🔄 Repost Msg') {
+    resetSession(uid, true);
+    session.state = STATES.WAIT_REPOST;
+    return updateUI(chatId, uid, `🔄 <b>Repost Mode:</b>\n\nযে মেসেজটি চ্যানেলে দিতে চান সেটি এখানে Forward করুন:`, CANCEL_INLINE_MENU);
   }
 
   // 2. AUTO-REPOST
@@ -354,7 +358,7 @@ bot.on('message', async (msg) => {
       resetSession(uid, true);
       return updateUI(chatId, uid, `✅ <b>Successfully Reposted!</b>`, { inline_keyboard: [[{ text: '🧹 Clear Screen', callback_data: 'clear_screen' }]] });
     } catch { 
-      return updateUI(chatId, uid, `❌ <b>Failed:</b> Protected content.`, CANCEL_MENU); 
+      return updateUI(chatId, uid, `❌ <b>Failed:</b> Protected content.`, CANCEL_INLINE_MENU); 
     }
   }
 
@@ -376,7 +380,7 @@ bot.on('message', async (msg) => {
       return;
     } else {
       session.mediaId = (msg.photo?.pop() || msg.video || msg.document || msg.audio || msg.voice || msg.animation || msg.sticker).file_id;
-      session.postType = msg.photo ? 'photo' : msg.video ? 'video' : msg.document ? 'document' : msg.audio ? 'audio' : msg.voice ? 'voice' : msg.animation ? 'animation' : 'sticker';
+      session.postType = msg.photo ? 'photo' : msg.video ? 'document' : msg.document ? 'document' : msg.audio ? 'audio' : msg.voice ? 'voice' : msg.animation ? 'animation' : 'sticker';
       session.state = ['sticker', 'video_note'].includes(session.postType) ? STATES.WAIT_CONFIRM : STATES.WAIT_TEXT;
       if (session.state === STATES.WAIT_CONFIRM) return updateUI(chatId, uid, renderPendingPreview(session), getConfirmMenu(session));
       return updateUI(chatId, uid, `✅ <b>Media Detected!</b>\n\nক্যাপশন টেক্সট সেন্ড করুন অথবা স্কিপ করতে বাটনে চাপুন:`, getStyleMenu(session));
@@ -384,7 +388,6 @@ bot.on('message', async (msg) => {
   }
 
   // 4. TEXT HANDLER
-  const rawText = msg.text || msg.caption || '';
   if (!rawText.trim()) return;
 
   const { textOnly, buttons } = parseButtonsBlock(rawText);
@@ -403,7 +406,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-// ---------------- CALLBACK QUERY HANDLER ----------------
+// ---------------- CALLBACK QUERY HANDLER (INLINE BUTTONS) ----------------
 bot.on('callback_query', async (query) => {
   const uid = String(query.from.id);
   const chatId = query.message.chat.id;
@@ -417,17 +420,7 @@ bot.on('callback_query', async (query) => {
   if (data === 'clear_screen') {
     resetSession(uid, false);
     if (session.lastBotMsgId) await safeDelete(chatId, session.lastBotMsgId);
-    return; // Leaves screen 100% blank!
-  }
-
-  // Route commands from Main Menu callbacks
-  if (data.startsWith('cmd_')) {
-    const cmd = data.replace('cmd_', '');
-    resetSession(uid, true);
-    if (cmd === 'text') { session.state = STATES.WAIT_TEXT; return updateUI(chatId, uid, `📝 <b>Text Builder:</b>\n\nআপনার টেক্সট সেন্ড করুন:`, CANCEL_MENU); }
-    if (cmd === 'media') { session.state = STATES.WAIT_MEDIA; return updateUI(chatId, uid, `📎 <b>Media Builder:</b>\n\nযেকোনো ছবি, ভিডিও বা অ্যালবাম সেন্ড করুন:`, CANCEL_MENU); }
-    if (cmd === 'raw') { session.state = STATES.WAIT_RAW; return updateUI(chatId, uid, `💻 <b>Raw HTML Mode:</b>\n\nকোড সেন্ড করুন:`, CANCEL_MENU); }
-    if (cmd === 'repost') { session.state = STATES.WAIT_REPOST; return updateUI(chatId, uid, `🔄 <b>Repost Mode:</b>\n\nযে মেসেজটি চ্যানেলে দিতে চান সেটি এখানে Forward করুন:`, CANCEL_MENU); }
+    return;
   }
 
   if (data.startsWith('pub_')) {
@@ -450,7 +443,7 @@ bot.on('callback_query', async (query) => {
 
   if (data === 'action_add_block') {
     session.state = STATES.WAIT_TEXT;
-    return updateUI(chatId, uid, `✏️ <b>Next Block:</b>\n\nটেক্সট সেন্ড করুন:`, { inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'clear_screen' }]] });
+    return updateUI(chatId, uid, `✏️ <b>Next Block:</b>\n\nটেক্সট সেন্ড করুন:`, CANCEL_INLINE_MENU);
   }
 
   if (data.startsWith('style_')) {
@@ -476,28 +469,16 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-// ---------------- STARTUP & MENU SETUP ----------------
+// ---------------- STARTUP ----------------
 async function startBot() {
-  console.log('🔄 Setting up Menu Button & Commands...');
+  console.log('🔄 Setting up Custom Reply Keyboard UI...');
+  await bot.deleteWebHook().catch(() => {});
   
-  // 1. Force Setup the Menu Commands & Button
-  try {
-    await bot.setMyCommands([
-      { command: 'start', description: '🏠 Home / Menu' },
-      { command: 'text', description: '📝 Create Text / Multi-Block Post' },
-      { command: 'media', description: '📎 Send Media / Album' },
-      { command: 'raw', description: '💻 Send Raw HTML' },
-      { command: 'repost', description: '🔄 Repost Message' },
-      { command: 'cancel', description: '❌ Clear Screen Fully' }
-    ]);
-    
-    // Explicit API call to force Menu Button visibility in Telegram
-    await bot.setChatMenuButton({ menu_button: { type: 'commands' } }).catch(() => {});
-    console.log('✅ Menu Button Configured Successfully!');
-  } catch (err) {
-    console.log('⚠️ Notice: Could not set MyCommands. Ignore if menu works.');
-  }
+  await bot.setMyCommands([
+    { command: 'start', description: 'Show Reply Keyboard Menu' }
+  ]);
   
-  console.log('🚀 Bot is live with 100% Clean Ghost UI and Zero Conflict Logic!');
+  await bot.startPolling();
+  console.log('🚀 Bot is live with Persistent Bottom Menu & Clean UI!');
 }
 startBot();

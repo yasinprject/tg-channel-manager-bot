@@ -5,4 +5,4 @@ compatibility_flags = [ "nodejs_compat" ]
 
 [[kv_namespaces]]
 binding = "SESSION_KV"
-id = "এখানে_আপনার_নতুন_KV_ID_বসাবেন"
+id = "bb056a585a7a48bcb1a661e93b039d91"

@@ -10,7 +10,11 @@ const STATES = Object.freeze({
 // ---------------- UTILITIES ----------------
 function escapeHtml(text) {
   if (!text) return '';
-  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function normalizeUrl(url) {
@@ -27,10 +31,13 @@ function parseButtonsBlock(inputText) {
 
   const textOnly = lines.slice(0, marker).join('\n').trim();
   const buttons = [];
+  
   for (const line of lines.slice(marker + 1).filter(l => l.trim())) {
     const row = line.split('||').map(b => b.trim()).filter(Boolean).map(btn => {
       const parts = btn.split('|').map(p => p.trim());
-      if (parts.length >= 2 && normalizeUrl(parts[1])) return Markup.button.url(parts[0].slice(0, 64), normalizeUrl(parts[1]));
+      if (parts.length >= 2 && normalizeUrl(parts[1])) {
+        return Markup.button.url(parts[0].slice(0, 64), normalizeUrl(parts[1]));
+      }
       return null;
     }).filter(Boolean);
     if (row.length) buttons.push(row);
@@ -53,10 +60,12 @@ const STYLES_LIST = [
 function buildStyledHtml(style, text) {
   const safe = escapeHtml(text || '');
   const lines = (text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  
   if (style === 'link') {
     const parts = (text || '').split('|').map(p => p.trim());
     return (parts.length >= 2 && normalizeUrl(parts[1])) ? `<a href="${escapeHtml(normalizeUrl(parts[1]))}">${escapeHtml(parts[0])}</a>` : safe;
   }
+  
   switch (style) {
     case 'normal': return safe;
     case 'title': return `🏆 <b>${escapeHtml((text||'').toUpperCase())}</b>\n━━━━━━━━━━━━━━━━━`;
@@ -95,7 +104,9 @@ const PERSISTENT_REPLY = Markup.keyboard([
 
 function getStyleMenu(session) {
   const kb = [];
-  if (session.mediaId || session.mediaAlbumItems) kb.push([Markup.button.callback('🚀 Skip Caption & Direct Post', 'action_skip_caption')]);
+  if (session.mediaId || session.mediaAlbumItems?.length > 0) {
+    kb.push([Markup.button.callback('🚀 Skip Caption & Direct Post', 'action_skip_caption')]);
+  }
   for (let i = 0; i < STYLES_LIST.length; i += 3) {
     const row = [];
     for(let j=0; j<3; j++) {
@@ -120,7 +131,7 @@ function getConfirmMenu(session) {
 function renderPendingPreview(session) {
   const html = session.draftBlocks.join('\n\n');
   const btns = session.draftButtons.length ? '\n\n<i>[Buttons Attached ✅]</i>' : '';
-  if (session.mediaAlbumItems) return `🧾 <b>Album Preview (${session.mediaAlbumItems.length} items):</b>\n\n${html || '<i>No caption</i>'}${btns}`;
+  if (session.mediaAlbumItems && session.mediaAlbumItems.length > 0) return `🧾 <b>Album Preview (${session.mediaAlbumItems.length} items):</b>\n\n${html || '<i>No caption</i>'}${btns}`;
   if (session.mediaId) return `🧾 <b>Media Preview:</b>\n\n${html || '<i>No caption</i>'}${btns}`;
   return `🧾 <b>Post Preview:</b>\n\n──────────────\n${html || '<i>Empty</i>'}\n──────────────${btns}`;
 }
@@ -136,8 +147,10 @@ export default {
       const CHANNEL_ID = env.CHANNEL_ID;
       const GHOST_MODE = String(env.GHOST_MODE ?? 'true').toLowerCase() === 'true';
 
-      // Middleware: Load Session from KV
+      // 1. Session & Auth Middleware
       bot.use(async (ctx, next) => {
+        // শুধুমাত্র প্রাইভেট চ্যাট এবং অথরাইজড ইউজারকে অ্যালাউ করবো
+        if (ctx.chat?.type !== 'private') return;
         const uid = String(ctx.from?.id);
         if (!uid || !OWNER_IDS.includes(uid)) return;
 
@@ -147,31 +160,33 @@ export default {
         if (!session) {
           session = {
             state: STATES.IDLE, tempRawText: null, postType: 'text',
-            mediaId: null, mediaAlbumItems: null, draftBlocks: [],
+            mediaId: null, mediaAlbumItems: [], draftBlocks: [],
             draftButtons: [], lastBotMsgId: null
           };
         }
         
         ctx.session = session;
         ctx.saveSession = async () => await env.SESSION_KV.put(kvKey, JSON.stringify(ctx.session));
+        
         ctx.resetSession = async (keepLastMsg = true) => {
           const lastMsg = ctx.session.lastBotMsgId;
           ctx.session = {
             state: STATES.IDLE, tempRawText: null, postType: 'text',
-            mediaId: null, mediaAlbumItems: null, draftBlocks: [],
+            mediaId: null, mediaAlbumItems: [], draftBlocks: [],
             draftButtons: [], lastBotMsgId: keepLastMsg ? lastMsg : null
           };
           await ctx.saveSession();
         };
 
-        // Ghost Mode function
         ctx.safeDelete = async (msgId) => {
-          try { if (msgId) await ctx.telegram.deleteMessage(ctx.chat.id, msgId); } catch (_) {}
+          if (!msgId) return;
+          try { await ctx.telegram.deleteMessage(ctx.chat.id, msgId); } catch (_) {}
         };
 
+        // Ghost Mode (ইউজারের পাঠানো মেসেজ সাথে সাথে মুছে দেওয়া)
         if (ctx.message && GHOST_MODE) await ctx.safeDelete(ctx.message.message_id);
 
-        // UI Updater
+        // Smart UI Updater
         ctx.updateUI = async (text, markupType = 'inline', customInlineKb = null) => {
           await ctx.sendChatAction('typing').catch(() => {});
           const extra = { parse_mode: 'HTML', disable_web_page_preview: true };
@@ -184,19 +199,23 @@ export default {
               await ctx.telegram.editMessageText(ctx.chat.id, ctx.session.lastBotMsgId, undefined, text, extra);
               return;
             } catch (e) {
+              // মেসেজ সেইম হলে ইগনোর করবে, নাহলে ফলব্যাক হিসেবে নতুন মেসেজ পাঠাবে
               if (e.description && e.description.includes('exactly the same')) return;
             }
           }
 
+          // যদি এডিট করা না যায় (মেসেজ ডিলিট হয়ে থাকলে), পুরনোটা ক্লিয়ার করে নতুন পাঠাবে
           await ctx.safeDelete(ctx.session.lastBotMsgId);
           try {
             const sent = await ctx.reply(text, extra);
             ctx.session.lastBotMsgId = sent.message_id;
             await ctx.saveSession();
-          } catch (err) { console.log('UI Send Error ignored.'); }
+          } catch (err) { console.error('UI Update Error:', err); }
         };
 
         await next();
+        
+        // সব কাজ শেষে সেশন সেভ করা
         await ctx.saveSession();
       });
 
@@ -204,11 +223,17 @@ export default {
       const executePublish = async (ctx, opts) => {
         const html = ctx.session.draftBlocks.join('\n\n');
         const extra = { parse_mode: 'HTML', disable_web_page_preview: true, disable_notification: opts.silent };
-        if (ctx.session.draftButtons.length) extra.reply_markup = { inline_keyboard: ctx.session.draftButtons };
+        const textExtra = { ...extra };
+        
+        if (ctx.session.draftButtons.length > 0) {
+          extra.reply_markup = { inline_keyboard: ctx.session.draftButtons };
+          textExtra.reply_markup = { inline_keyboard: ctx.session.draftButtons };
+        }
         
         let sentMsg;
 
         if (ctx.session.postType === 'text') {
+          // Text Post
           if (html.length <= 4096) {
             sentMsg = await ctx.telegram.sendMessage(CHANNEL_ID, html, extra);
           } else {
@@ -219,20 +244,31 @@ export default {
             }
           }
         } else if (ctx.session.postType === 'album') {
+          // Album Post
           const mediaPayload = ctx.session.mediaAlbumItems.map((it, idx) => ({
             type: it.type, media: it.media,
             ...(idx === 0 && html && !ctx.session.draftButtons.length && html.length <= 1024 ? { caption: html, parse_mode: 'HTML' } : {})
           }));
+          
           const msgs = await ctx.telegram.sendMediaGroup(CHANNEL_ID, mediaPayload, { disable_notification: opts.silent });
           sentMsg = msgs[0];
+          
+          // যদি বাটন্স থাকে অথবা ক্যাপশন অনেক বড় হয়, তাহলে টেক্সট আলাদা পাঠাবে
           if (ctx.session.draftButtons.length || (html && html.length > 1024)) {
-            await ctx.telegram.sendMessage(CHANNEL_ID, html || '🔗 Links:', extra);
+            await ctx.telegram.sendMessage(CHANNEL_ID, html || '🔗 Links:', textExtra);
           }
         } else {
+          // Single Media Post
+          let hasSeparateText = false;
           if (html && !['sticker', 'video_note'].includes(ctx.session.postType)) {
-            if (html.length > 1024) { await ctx.telegram.sendMessage(CHANNEL_ID, html, extra); extra.caption = ''; } 
-            else extra.caption = html;
+            if (html.length > 1024) { 
+              extra.caption = ''; 
+              hasSeparateText = true; 
+            } else {
+              extra.caption = html;
+            }
           }
+
           const mId = ctx.session.mediaId;
           const pt = ctx.session.postType;
           
@@ -243,12 +279,16 @@ export default {
           else if (pt === 'voice') sentMsg = await ctx.telegram.sendVoice(CHANNEL_ID, mId, extra);
           else if (pt === 'animation') sentMsg = await ctx.telegram.sendAnimation(CHANNEL_ID, mId, extra);
           else if (pt === 'sticker') sentMsg = await ctx.telegram.sendSticker(CHANNEL_ID, mId, extra);
+
+          if (hasSeparateText) {
+             await ctx.telegram.sendMessage(CHANNEL_ID, html, textExtra);
+          }
         }
         
         if (opts.pin && sentMsg) await ctx.telegram.pinChatMessage(CHANNEL_ID, sentMsg.message_id, { disable_notification: opts.silent });
       };
 
-      // ---------------- COMMANDS & MESSAGES ----------------
+      // ---------------- MESSAGE HANDLERS ----------------
       bot.on('message', async (ctx) => {
         const msg = ctx.message;
         const text = msg.text || msg.caption || '';
@@ -265,7 +305,7 @@ export default {
           return;
         }
 
-        // Main Menu Options
+        // Menus
         if (text === '📝 Text / Multi-Block') {
           await ctx.resetSession(true);
           session.state = STATES.WAIT_TEXT;
@@ -294,26 +334,31 @@ export default {
             await ctx.resetSession(true);
             return ctx.updateUI(`✅ <b>Successfully Reposted!</b>\n\n<i>নিচের মেনু থেকে নতুন কাজ শুরু করুন।</i>`, 'reply');
           } catch { 
-            return ctx.updateUI(`❌ <b>Failed:</b> Protected content.`, 'inline', CANCEL_INLINE); 
+            return ctx.updateUI(`❌ <b>Failed:</b> Protected content or invalid forward.`, 'inline', CANCEL_INLINE); 
           }
         }
 
         // Media Handling
-        if ([STATES.IDLE, STATES.WAIT_MEDIA].includes(session.state) && (msg.photo || msg.video || msg.document || msg.audio || msg.voice || msg.animation || msg.sticker)) {
-          if (msg.media_group_id) {
-             // Serverless Album Handling Workaround
-             const type = msg.photo ? 'photo' : 'video';
-             const fileId = msg.photo ? msg.photo[msg.photo.length - 1].file_id : msg.video.file_id;
+        const isMedia = msg.photo || msg.video || msg.document || msg.audio || msg.voice || msg.animation || msg.sticker;
+        if ([STATES.IDLE, STATES.WAIT_MEDIA].includes(session.state) && isMedia) {
+          
+          if (msg.media_group_id || session.mediaAlbumItems.length > 0 || msg.photo) {
+             // Cloudflare Worker Workaround for Albums
+             const type = msg.photo ? 'photo' : msg.video ? 'video' : 'document';
+             const fileId = msg.photo ? msg.photo[msg.photo.length - 1].file_id : (msg.video?.file_id || msg.document?.file_id);
              
              if (!session.mediaAlbumItems) session.mediaAlbumItems = [];
              session.mediaAlbumItems.push({ type, media: fileId });
-             session.postType = 'album';
+             
+             session.postType = session.mediaAlbumItems.length > 1 ? 'album' : type;
+             session.mediaId = fileId; // Single id fallback
              session.state = STATES.WAIT_TEXT;
              
-             return ctx.updateUI(`✅ <b>Album Item Added! (Total: ${session.mediaAlbumItems.length})</b>\n\nঅ্যালবামের পরের ছবিগুলো পাঠাতে থাকুন। সব পাঠানো শেষ হলে নিচে ক্যাপশন টেক্সট দিন অথবা 'Skip Caption' এ চাপুন:`, 'inline', getStyleMenu(session));
+             return ctx.updateUI(`✅ <b>Media Added! (Total Items: ${session.mediaAlbumItems.length})</b>\n\nঅ্যালবাম তৈরি করতে পরের ছবি/ভিডিওগুলো পাঠাতে থাকুন। সব পাঠানো শেষ হলে নিচে ক্যাপশন টেক্সট দিন অথবা 'Skip Caption' বাটনে চাপুন:`, 'inline', getStyleMenu(session));
           } else {
-            session.mediaId = (msg.photo?.pop() || msg.video || msg.document || msg.audio || msg.voice || msg.animation || msg.sticker).file_id;
-            session.postType = msg.photo ? 'photo' : msg.video ? 'video' : msg.document ? 'document' : msg.audio ? 'audio' : msg.voice ? 'voice' : msg.animation ? 'animation' : 'sticker';
+            // Single Audio, Voice, Sticker etc.
+            session.mediaId = msg.document?.file_id || msg.audio?.file_id || msg.voice?.file_id || msg.animation?.file_id || msg.sticker?.file_id;
+            session.postType = msg.document ? 'document' : msg.audio ? 'audio' : msg.voice ? 'voice' : msg.animation ? 'animation' : 'sticker';
             session.state = ['sticker', 'video_note'].includes(session.postType) ? STATES.WAIT_CONFIRM : STATES.WAIT_TEXT;
             
             if (session.state === STATES.WAIT_CONFIRM) return ctx.updateUI(renderPendingPreview(session), 'inline', getConfirmMenu(session));
@@ -325,7 +370,7 @@ export default {
         if (!text.trim()) return;
 
         const { textOnly, buttons } = parseButtonsBlock(text);
-        if (buttons.length) session.draftButtons = buttons;
+        if (buttons.length > 0) session.draftButtons = buttons;
 
         if (session.state === STATES.WAIT_RAW) {
           session.draftBlocks.push(textOnly);
@@ -380,7 +425,9 @@ export default {
         if (data === 'action_undo_last') {
           session.draftBlocks.pop();
           if (!session.draftBlocks.length) session.draftButtons = [];
-          if (!session.draftBlocks.length && !session.mediaId && !session.mediaAlbumItems) {
+          
+          // যদি সব ডিলিট হয়ে যায় এবং কোন মিডিয়া না থাকে
+          if (!session.draftBlocks.length && !session.mediaId && session.mediaAlbumItems.length === 0) {
             await ctx.resetSession(true);
             return ctx.updateUI(`🧹 Draft Cleared.`, 'reply');
           }
@@ -393,13 +440,15 @@ export default {
         }
       });
 
+      // Execute Telegraf Update Process
       const update = await request.json();
       await bot.handleUpdate(update);
       return new Response('OK', { status: 200 });
 
     } catch (error) {
       console.error('Worker Error:', error);
-      return new Response('Error', { status: 500 });
+      // Cloudflare এ 500 error দিলে টেলিগ্রাম বারবার রি-ট্রাই করে, তাই 200 দেয়াই সেফ
+      return new Response('OK', { status: 200 });
     }
   }
 };

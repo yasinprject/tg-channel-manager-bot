@@ -1,13 +1,14 @@
 {
-  "name": "tg-channel-manager-bot",
+  "name": "channel-manager-pro-cf",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "src/index.js",
   "scripts": {
-    "start": "node index.js"
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "dotenv": "^16.4.0",
-    "express": "^4.19.0",
-    "node-telegram-bot-api": "^0.66.0"
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
   }
 }

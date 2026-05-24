@@ -3,6 +3,12 @@ main = "src/index.js"
 compatibility_date = "2024-11-01"
 compatibility_flags = [ "nodejs_compat" ]
 
+# এই অংশটি যোগ করুন (আপনার আসল আইডিগুলো দিবেন)
+[vars]
+CHANNEL_ID = "-1003750325331"  # আপনার চ্যানেলের আইডি
+OWNER_IDS = "6047702323"       # আপনার টেলিগ্রাম আইডি
+GHOST_MODE = "true"
+
 [[kv_namespaces]]
 binding = "SESSION_KV"
 id = "bb056a585a7a48bcb1a661e93b039d91"
